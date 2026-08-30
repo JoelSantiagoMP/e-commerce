@@ -9,6 +9,7 @@ import com.tienda.entity.OrderItem;
 import com.tienda.entity.OrderStatus;
 import com.tienda.entity.ProductVariant;
 import com.tienda.exception.InsufficientStockException;
+import com.tienda.exception.PaymentAlreadyProcessedException;
 import com.tienda.exception.ResourceNotFoundException;
 import com.tienda.repository.CustomerRepository;
 import com.tienda.repository.OrderItemRepository;
@@ -107,6 +108,41 @@ public class OrderService {
         Order updatedOrder = orderRepository.save(order);
 
         return toOrderDTO(updatedOrder, orderItemRepository.findByOrderId(orderId));
+    }
+
+    @Transactional
+    public OrderDTO confirmOrderAfterPayment(Long orderId) {
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new ResourceNotFoundException("Orden no encontrada con id: " + orderId));
+
+        if (order.getStatus() != OrderStatus.PENDING) {
+            throw new PaymentAlreadyProcessedException(
+                    "La orden " + orderId + " no está pendiente de pago. Estado actual: " + order.getStatus());
+        }
+
+        List<OrderItem> items = orderItemRepository.findByOrderId(orderId);
+        validateOrderItemsStock(items);
+
+        order.setStatus(OrderStatus.CONFIRMED);
+        Order confirmedOrder = orderRepository.save(order);
+
+        return toOrderDTO(confirmedOrder, items);
+    }
+
+    private void validateOrderItemsStock(List<OrderItem> items) {
+        for (OrderItem item : items) {
+            ProductVariant variant = item.getProductVariant();
+
+            if (!Boolean.TRUE.equals(variant.getIsActive())) {
+                throw new InsufficientStockException(
+                        "Variante inactiva o no disponible: " + variant.getSku());
+            }
+
+            if (variant.getStock() < 0) {
+                throw new InsufficientStockException(
+                        "Stock inválido para SKU: " + variant.getSku());
+            }
+        }
     }
 
     private BigDecimal resolveUnitPrice(ProductVariant variant) {

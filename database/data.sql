@@ -1,5 +1,5 @@
 -- =============================================================================
--- E-Commerce Micro-SaaS — Datos de prueba (MySQL 8.x)
+-- E-Commerce Micro-SaaS — Datos de prueba: Repuestos Automotrices (MySQL 8.x)
 -- Requiere ejecutar schema.sql previamente.
 --
 -- Idempotencia: TRUNCATE al inicio garantiza estado limpio en cada ejecución
@@ -20,68 +20,74 @@ TRUNCATE TABLE categories;
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- ---------------------------------------------------------------------------
--- Categorías (2)
+-- Categorías (3)
 -- ---------------------------------------------------------------------------
-INSERT INTO categories (name, description, is_active) VALUES
-    ('Ropa',        'Prendas de vestir para hombre y mujer', TRUE),
-    ('Accesorios',  'Complementos y artículos de moda',      TRUE);
+INSERT INTO categories (id, name, description, is_active) VALUES
+    (1, 'Sistema de Frenos',        'Pastillas, discos, líquido de frenos y componentes de frenado', TRUE),
+    (2, 'Filtración y Lubricantes', 'Filtros de aceite/aire/combustible y lubricantes sintéticos',  TRUE),
+    (3, 'Suspensión y Dirección',   'Amortiguadores, bases, terminales y componentes de suspensión', TRUE);
 
 -- ---------------------------------------------------------------------------
--- Productos (3) con variantes
+-- Productos (3)
 -- ---------------------------------------------------------------------------
-INSERT INTO products (category_id, name, description, base_price, is_active) VALUES
-    (1, 'Camiseta Básica',     'Camiseta de algodón 100% unisex',           29.99, TRUE),
-    (1, 'Jeans Slim Fit',      'Pantalón denim corte slim fit',             59.99, TRUE),
-    (2, 'Gorra Deportiva',     'Gorra ajustable con visera curva',          19.99, TRUE);
+INSERT INTO products (id, category_id, name, description, base_price, is_active) VALUES
+    (1, 1, 'Pastillas de Freno Cerámicas',
+        'Pastillas cerámicas de bajo ruido y alta durabilidad. Compatible con múltiples modelos compactos y pick-ups.',
+        85000.00, TRUE),
+    (2, 2, 'Kit de Filtros + Aceite 20W50 Sintético',
+        'Kit de mantenimiento preventivo: 4 litros de aceite sintético 20W50 + filtro de aceite OEM equivalente.',
+        120000.00, TRUE),
+    (3, 3, 'Amortiguadores a Gas Nitrógeno',
+        'Amortiguadores a gas con tecnología de nitrógeno para mayor estabilidad y confort de marcha.',
+        180000.00, TRUE);
 
--- Camiseta Básica — 3 variantes (talla + color)
-INSERT INTO product_variants (product_id, sku, size, color, stock, price_override, is_active) VALUES
-    (1, 'CAM-BAS-S-BLK',  'S',  'Negro',  50, NULL,  TRUE),
-    (1, 'CAM-BAS-M-WHT',  'M',  'Blanco', 35, NULL,  TRUE),
-    (1, 'CAM-BAS-L-GRY',  'L',  'Gris',   20, 27.99, TRUE);
-
--- Jeans Slim Fit — 2 variantes
-INSERT INTO product_variants (product_id, sku, size, color, stock, price_override, is_active) VALUES
-    (2, 'JNS-SLM-32-BLU', '32', 'Azul', 15, NULL, TRUE),
-    (2, 'JNS-SLM-34-BLU', '34', 'Azul', 10, NULL, TRUE);
-
--- Gorra Deportiva — 2 variantes (color)
-INSERT INTO product_variants (product_id, sku, size, color, stock, price_override, is_active) VALUES
-    (3, 'GOR-DEP-UNI-RED',  'UNI', 'Rojo',  25, NULL, TRUE),
-    (3, 'GOR-DEP-UNI-BLK',  'UNI', 'Negro', 30, NULL, TRUE);
+-- ---------------------------------------------------------------------------
+-- Variantes (7)
+--   size  → tipo / posición (VARCHAR 20)
+--   color → compatibilidad vehicular (VARCHAR 50)
+-- ---------------------------------------------------------------------------
+INSERT INTO product_variants (id, product_id, sku, size, color, stock, price_override, is_active) VALUES
+    (1, 1, 'FRN-CHE-001', 'Juego',  'Corsa / Aveo 1.4',              15, 85000.00,  TRUE),
+    (2, 1, 'FRN-REN-002', 'Juego',  'Logan / Sandero 1.6',           10, 92000.00,  TRUE),
+    (3, 1, 'FRN-TOY-003', 'Juego',  'Hilux 2.4 / Fortuner',           6, 145000.00, TRUE),
+    (4, 2, 'LUB-CHE-010', 'Kit 4L', '4 Litros + Filtro Aceite Corsa', 20, 120000.00, TRUE),
+    (5, 2, 'LUB-REN-011', 'Kit 4L', '4 Litros + Filtro Aceite Logan', 12, 135000.00, TRUE),
+    (6, 3, 'SUS-CHE-020', 'Delantero', 'Delanteros Corsa Evolution',   8, 210000.00, TRUE),
+    (7, 3, 'SUS-CHE-021', 'Trasero',   'Traseros Corsa Evolution',     8, 180000.00, TRUE);
 
 -- ---------------------------------------------------------------------------
 -- Clientes (3) — INSERT IGNORE evita duplicados por telegram_chat_id único
 -- ---------------------------------------------------------------------------
 INSERT IGNORE INTO customers (id, telegram_chat_id, full_name, phone, address, created_at) VALUES
-    (1, 5847291036, 'María González',      '+57 300 123 4567', 'Calle 45 #12-34, Bogotá',           '2026-08-28 10:15:00'),
-    (2, 5918374620, 'Carlos Rodríguez',    '+57 310 987 6543', 'Carrera 7 #80-20, Medellín',        '2026-08-29 14:30:00'),
-    (3, 6029481753, 'Ana Lucía Martínez',  '+57 320 555 8899', 'Av. Santander #25-10, Bucaramanga', '2026-08-30 09:00:00');
+    (1, 573001234567, 'Taller Mecánico El Paisa',  '+57 607 645 1122', 'Km 4 Vía Piedecuesta, Floridablanca', '2026-08-28 08:30:00'),
+    (2, 573109876543, 'Autopartes Santander',      '+57 607 698 3344', 'Calle 41 #34-12, Bucaramanga',       '2026-08-29 10:15:00'),
+    (3, 573205551899, 'Cliente Particular',        '+57 318 220 7788', 'Urbanización Bosques del Norte',     '2026-08-30 14:00:00');
 
 -- ---------------------------------------------------------------------------
--- Órdenes (4) — estados variados para demo del panel admin
---   Orden 1: PENDING   → 2× Camiseta M Blanco + 1× Gorra Roja  = 79.97
---   Orden 2: CONFIRMED → 1× Jeans 32 + 1× Camiseta L Gris      = 87.98
---   Orden 3: SHIPPED   → 3× Gorra Negra                        = 59.97
---   Orden 4: CANCELLED → 2× Jeans 34                             = 119.98
+-- Órdenes (4) — estados variados para demo comercial
+--   Orden 1: PENDING   → 2× FRN-CHE-001 + 1× LUB-CHE-010     = 290000.00
+--   Orden 2: CONFIRMED → 1× FRN-TOY-003 + 1× LUB-REN-011     = 280000.00
+--   Orden 3: SHIPPED   → 1× SUS-CHE-020 + 1× SUS-CHE-021     = 390000.00
+--   Orden 4: CANCELLED → 2× FRN-REN-002                       = 184000.00
 -- ---------------------------------------------------------------------------
 INSERT IGNORE INTO orders (id, customer_id, total_amount, status, created_at) VALUES
-    (1, 1,  79.97, 'PENDING',   '2026-08-30 11:20:00'),
-    (2, 2,  87.98, 'CONFIRMED', '2026-08-29 16:45:00'),
-    (3, 3,  59.97, 'SHIPPED',   '2026-08-28 18:10:00'),
-    (4, 1, 119.98, 'CANCELLED', '2026-08-27 08:55:00');
+    (1, 1, 290000.00, 'PENDING',   '2026-08-30 09:45:00'),
+    (2, 2, 280000.00, 'CONFIRMED', '2026-08-29 15:20:00'),
+    (3, 3, 390000.00, 'SHIPPED',   '2026-08-28 11:10:00'),
+    (4, 1, 184000.00, 'CANCELLED', '2026-08-27 16:55:00');
 
 -- ---------------------------------------------------------------------------
--- Ítems de orden — vinculados a product_variants (ids 1-7 del seed anterior)
+-- Ítems de orden — vinculados a product_variants (ids 1-7)
 -- ---------------------------------------------------------------------------
 INSERT IGNORE INTO order_items (id, order_id, product_variant_id, quantity, unit_price) VALUES
-    -- Orden 1 (PENDING): total 59.98 + 19.99 = 79.97
-    (1, 1, 2, 2, 29.99),   -- CAM-BAS-M-WHT
-    (2, 1, 6, 1, 19.99),   -- GOR-DEP-UNI-RED
-    -- Orden 2 (CONFIRMED): total 59.99 + 27.99 = 87.98
-    (3, 2, 4, 1, 59.99),   -- JNS-SLM-32-BLU
-    (4, 2, 3, 1, 27.99),   -- CAM-BAS-L-GRY (price_override)
-    -- Orden 3 (SHIPPED): total 59.97
-    (5, 3, 7, 3, 19.99),   -- GOR-DEP-UNI-BLK
-    -- Orden 4 (CANCELLED): total 119.98
-    (6, 4, 5, 2, 59.99);   -- JNS-SLM-34-BLU
+    -- Orden 1 (PENDING): 170000 + 120000 = 290000
+    (1, 1, 1, 2, 85000.00),   -- FRN-CHE-001
+    (2, 1, 4, 1, 120000.00),  -- LUB-CHE-010
+    -- Orden 2 (CONFIRMED): 145000 + 135000 = 280000
+    (3, 2, 3, 1, 145000.00),  -- FRN-TOY-003
+    (4, 2, 5, 1, 135000.00),  -- LUB-REN-011
+    -- Orden 3 (SHIPPED): 210000 + 180000 = 390000
+    (5, 3, 6, 1, 210000.00),  -- SUS-CHE-020
+    (6, 3, 7, 1, 180000.00),  -- SUS-CHE-021
+    -- Orden 4 (CANCELLED): 184000
+    (7, 4, 2, 2, 92000.00);   -- FRN-REN-002
