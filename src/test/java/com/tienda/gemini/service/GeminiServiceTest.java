@@ -208,6 +208,37 @@ class GeminiServiceTest {
     }
 
     @Test
+    void executeFunction_crearOrden_defaultsQuantityWhenZero() {
+        ProductVariant variant = ProductVariant.builder()
+                .id(10L)
+                .sku("FRN-CHE-001")
+                .stock(15)
+                .isActive(true)
+                .product(Product.builder().name("Pastillas Corsa").basePrice(new BigDecimal("85000")).build())
+                .build();
+
+        OrderDTO createdOrder = OrderDTO.builder()
+                .id(102L)
+                .status(OrderStatus.PENDING)
+                .totalAmount(new BigDecimal("85000"))
+                .build();
+
+        when(productVariantRepository.findBySku("FRN-CHE-001")).thenReturn(Optional.of(variant));
+        when(orderService.createOrder(eq(7L), any())).thenReturn(createdOrder);
+
+        ObjectNode args = objectMapper.createObjectNode()
+                .put("sku", "FRN-CHE-001")
+                .put("cantidad", 0);
+
+        Map<String, Object> result = geminiService.executeFunction("crearOrden", args, 7L);
+
+        ArgumentCaptor<List<OrderItemRequestDTO>> itemsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(orderService).createOrder(eq(7L), itemsCaptor.capture());
+        assertEquals(1, itemsCaptor.getValue().get(0).getQuantity());
+        assertEquals(102L, result.get("orderId"));
+    }
+
+    @Test
     void executeFunction_crearOrden_usesDefaultQuantityWhenMissing() {
         ProductVariant variant = ProductVariant.builder()
                 .id(10L)

@@ -279,18 +279,33 @@ public class GeminiService {
         if (value.isMissingNode() || value.isNull()) {
             return defaultValue;
         }
+        int parsed;
         if (value.isNumber()) {
-            return value.intValue();
-        }
-        if (value.isTextual()) {
+            parsed = value.intValue();
+        } else if (value.isTextual()) {
+            String text = value.asText().trim();
+            if (text.isBlank()) {
+                return defaultValue;
+            }
             try {
-                return Integer.parseInt(value.asText().trim());
+                parsed = Integer.parseInt(text);
             } catch (NumberFormatException ex) {
                 throw new IllegalArgumentException(
                         "El parámetro '" + fieldName + "' debe ser un entero positivo.");
             }
+        } else {
+            throw new IllegalArgumentException("El parámetro '" + fieldName + "' debe ser un entero positivo.");
         }
-        throw new IllegalArgumentException("El parámetro '" + fieldName + "' debe ser un entero positivo.");
+        return parsed <= 0 ? defaultValue : parsed;
+    }
+
+    private void validateStockForPurchase(String sku, int cantidadRequerida, ProductVariant variant) {
+        int stock = variant.getStock() != null ? variant.getStock() : 0;
+        log.info("Procesando compra - SKU: {}, Cantidad solicitada: {}, Stock actual: {}", sku, cantidadRequerida, stock);
+        if (cantidadRequerida > stock) {
+            throw new InsufficientStockException(
+                    "Stock insuficiente para SKU: " + variant.getSku() + ". Disponible: " + stock);
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -426,10 +441,7 @@ public class GeminiService {
             Product product = variant.getProduct();
             BigDecimal unitPrice = resolveUnitPrice(variant, product);
 
-            if (variant.getStock() < line.quantity()) {
-                throw new InsufficientStockException(
-                        "Stock insuficiente para SKU: " + variant.getSku() + ". Disponible: " + variant.getStock());
-            }
+            validateStockForPurchase(line.sku(), line.quantity(), variant);
 
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("sku", variant.getSku());
@@ -461,10 +473,7 @@ public class GeminiService {
         List<OrderItemRequestDTO> orderItems = new ArrayList<>();
         for (PendingOrderLine line : items) {
             ProductVariant variant = findActiveVariant(line.sku());
-            if (variant.getStock() < line.quantity()) {
-                throw new InsufficientStockException(
-                        "Stock insuficiente para SKU: " + variant.getSku() + ". Disponible: " + variant.getStock());
-            }
+            validateStockForPurchase(line.sku(), line.quantity(), variant);
             orderItems.add(OrderItemRequestDTO.builder()
                     .productVariantId(variant.getId())
                     .quantity(line.quantity())
@@ -492,9 +501,6 @@ public class GeminiService {
         for (JsonNode itemNode : itemsNode) {
             String sku = extractStringArg(itemNode, "sku");
             int quantity = extractIntArg(itemNode, "cantidad", 1);
-            if (quantity <= 0) {
-                throw new IllegalArgumentException("La cantidad debe ser un entero positivo.");
-            }
             items.add(new PendingOrderLine(sku.trim().toUpperCase(), quantity));
         }
         return items;
@@ -506,15 +512,11 @@ public class GeminiService {
                 throw new IllegalArgumentException("Se requiere un cliente identificado para crear la orden.");
             }
             if (cantidad <= 0) {
-                throw new IllegalArgumentException("La cantidad debe ser un entero positivo.");
+                cantidad = 1;
             }
 
             ProductVariant variant = findActiveVariant(rawSku);
-
-            if (variant.getStock() < cantidad) {
-                throw new InsufficientStockException(
-                        "Stock insuficiente para SKU: " + variant.getSku() + ". Disponible: " + variant.getStock());
-            }
+            validateStockForPurchase(variant.getSku(), cantidad, variant);
 
             OrderDTO order = orderService.createOrder(
                     customerId,

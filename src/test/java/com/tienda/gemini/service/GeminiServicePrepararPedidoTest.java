@@ -65,6 +65,55 @@ class GeminiServicePrepararPedidoTest {
     }
 
     @Test
+    void executeFunction_prepararPedido_defaultsQuantityWhenMissing() {
+        stubVariant("FRN-CHE-001", 1L, 15, "85000");
+
+        ObjectNode args = objectMapper.createObjectNode();
+        ArrayNode items = objectMapper.createArrayNode();
+        items.add(objectMapper.createObjectNode().put("sku", "FRN-CHE-001"));
+        args.set("items", items);
+
+        Map<String, Object> result = geminiService.executeFunction("prepararPedido", args, 1L);
+
+        assertEquals(true, result.get("awaitingConfirmation"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> validatedItems = (List<Map<String, Object>>) result.get("items");
+        assertEquals(1, validatedItems.get(0).get("quantity"));
+    }
+
+    @Test
+    void executeFunction_prepararPedido_defaultsQuantityWhenZeroOrNegative() {
+        stubVariant("FRN-CHE-001", 1L, 15, "85000");
+
+        ObjectNode args = objectMapper.createObjectNode();
+        ArrayNode items = objectMapper.createArrayNode();
+        items.add(objectMapper.createObjectNode().put("sku", "FRN-CHE-001").put("cantidad", 0));
+        args.set("items", items);
+
+        Map<String, Object> result = geminiService.executeFunction("prepararPedido", args, 1L);
+
+        assertEquals(true, result.get("awaitingConfirmation"));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> validatedItems = (List<Map<String, Object>>) result.get("items");
+        assertEquals(1, validatedItems.get(0).get("quantity"));
+    }
+
+    @Test
+    void executeFunction_prepararPedido_allowsPurchaseWhenQuantityEqualsStock() {
+        stubVariant("FRN-CHE-001", 1L, 15, "85000");
+
+        ObjectNode args = objectMapper.createObjectNode();
+        ArrayNode items = objectMapper.createArrayNode();
+        items.add(objectMapper.createObjectNode().put("sku", "FRN-CHE-001").put("cantidad", 15));
+        args.set("items", items);
+
+        Map<String, Object> result = geminiService.executeFunction("prepararPedido", args, 1L);
+
+        assertEquals(true, result.get("awaitingConfirmation"));
+        assertEquals(new BigDecimal("1275000"), result.get("totalAmount"));
+    }
+
+    @Test
     void executeFunction_prepararPedido_validatesMultipleItemsWithoutCreatingOrder() {
         stubVariant("FRN-TOY-003", 10L, 6, "145000");
         stubVariant("SUS-CHE-021", 11L, 8, "180000");
