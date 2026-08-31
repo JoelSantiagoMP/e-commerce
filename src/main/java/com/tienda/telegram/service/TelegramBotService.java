@@ -24,10 +24,12 @@ import io.micrometer.core.instrument.MeterRegistry;
 import java.math.BigDecimal;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
+import java.text.Normalizer;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -41,6 +43,15 @@ public class TelegramBotService {
     private static final String CONFIRM_ORDER_PREFIX = "CONFIRM_ORDER:";
     private static final String SELECT_QTY_PREFIX = "SELECT_QTY:";
     private static final String CANCEL_ORDER_CALLBACK = "CANCEL_ORDER";
+
+    private static final Set<String> GREETING_EXACT = Set.of(
+            "hola", "buenas", "buenos dias", "buenas tardes", "buenas noches",
+            "inicio", "hey", "saludos", "buen dia");
+
+    private static final Set<String> GREETING_SHORT_PREFIX = Set.of("hola", "buenas", "inicio", "hey");
+
+    private static final List<String> CATALOG_KEYWORDS = List.of(
+            "catalogo", "que vendes", "productos", "precios", "inventario", "repuestos");
 
     private final ProductService productService;
     private final OrderService orderService;
@@ -99,7 +110,7 @@ public class TelegramBotService {
                 case "/comprar" -> handleComprar(chatId, chat, trimmedText, messageAlreadySent);
                 default -> trimmedText.startsWith("/")
                         ? "Comando no reconocido.\n\n" + buildMenuMessage()
-                        : handleFreeText(chatId, chat, trimmedText);
+                        : routeLocalIntentOrGemini(chatId, chat, trimmedText);
             };
         } catch (ResourceNotFoundException | InsufficientStockException ex) {
             log.warn("Error de negocio en Telegram chatId={}: {}", chatId, ex.getMessage());
@@ -307,6 +318,71 @@ public class TelegramBotService {
 
         log.info("Catálogo generado con {} categorías activas", categories.size());
         return catalog.toString().trim();
+    }
+
+    private String routeLocalIntentOrGemini(Long chatId, TelegramChatDTO chat, String text) {
+        String normalized = normalizeForIntent(text);
+        LocalIntent intent = resolveLocalIntent(normalized);
+
+        return switch (intent) {
+            case CATALOG -> {
+                log.info("Intención local CATALOG detectada para chatId={}: '{}'", chatId, text);
+                yield handleCatalogo();
+            }
+            case GREETING -> {
+                log.info("Intención local GREETING detectada para chatId={}: '{}'", chatId, text);
+                yield handleGreeting(chatId, chat);
+            }
+            case NONE -> handleFreeText(chatId, chat, text);
+        };
+    }
+
+    enum LocalIntent {
+        CATALOG, GREETING, NONE
+    }
+
+    String normalizeForIntent(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        String normalized = text.trim().toLowerCase(Locale.ROOT);
+        normalized = Normalizer.normalize(normalized, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "");
+        normalized = normalized.replaceAll("[^a-z0-9\\s]", " ");
+        return normalized.replaceAll("\\s+", " ").trim();
+    }
+
+    LocalIntent resolveLocalIntent(String normalizedText) {
+        if (normalizedText.isBlank()) {
+            return LocalIntent.NONE;
+        }
+
+        if (GREETING_EXACT.contains(normalizedText) || isShortGreeting(normalizedText)) {
+            return LocalIntent.GREETING;
+        }
+
+        for (String keyword : CATALOG_KEYWORDS) {
+            if (normalizedText.contains(keyword)) {
+                return LocalIntent.CATALOG;
+            }
+        }
+
+        return LocalIntent.NONE;
+    }
+
+    private boolean isShortGreeting(String normalizedText) {
+        String[] tokens = normalizedText.split("\\s+");
+        if (tokens.length > 2) {
+            return false;
+        }
+        return GREETING_SHORT_PREFIX.contains(tokens[0]);
+    }
+
+    private String handleGreeting(Long chatId, TelegramChatDTO chat) {
+        Customer customer = resolveOrCreateCustomer(chatId, chat);
+        return "¡Hola, " + customer.getFullName() + "! 🚗🛠️\n\n"
+                + "Soy tu Asesor Comercial Virtual de *Autorepuestos Demo*.\n\n"
+                + buildMenuMessage();
     }
 
     private String handleFreeText(Long chatId, TelegramChatDTO chat, String text) {

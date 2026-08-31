@@ -360,6 +360,87 @@ class TelegramBotServiceTest {
     }
 
     @Test
+    void processUpdate_catalogIntentWithoutSlash_routesToCatalogWithoutGemini() {
+        Long chatId = 777888999L;
+        TelegramUpdateDTO update = buildUpdate(chatId, "catalogo, déjame verlo", "Cliente");
+
+        stubCatalogData();
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Catálogo de Autorepuestos"));
+        verify(geminiService, never()).chat(any(), any());
+        verify(productService).getAllActiveCategories();
+    }
+
+    @Test
+    void processUpdate_queVendesIntent_routesToCatalogWithoutGemini() {
+        Long chatId = 777888999L;
+        TelegramUpdateDTO update = buildUpdate(chatId, "quiero saber qué vendes", "Cliente");
+
+        stubCatalogData();
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Catálogo de Autorepuestos"));
+        verify(geminiService, never()).chat(any(), any());
+    }
+
+    @Test
+    void processUpdate_greetingIntent_routesToWelcomeWithoutGemini() {
+        Long chatId = 777888999L;
+        TelegramUpdateDTO update = buildUpdate(chatId, "hola", "Cliente");
+
+        Customer customer = buildCustomer(chatId);
+        when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Autorepuestos Demo"));
+        assertTrue(response.contains("/catalogo"));
+        verify(geminiService, never()).chat(any(), any());
+        verify(customerRepository).findByTelegramChatId(chatId);
+    }
+
+    @Test
+    void resolveLocalIntent_detectsNormalizedKeywords() {
+        assertEquals(TelegramBotService.LocalIntent.CATALOG,
+                telegramBotService.resolveLocalIntent(telegramBotService.normalizeForIntent("catálogo")));
+        assertEquals(TelegramBotService.LocalIntent.GREETING,
+                telegramBotService.resolveLocalIntent(telegramBotService.normalizeForIntent("Buenas!")));
+        assertEquals(TelegramBotService.LocalIntent.NONE,
+                telegramBotService.resolveLocalIntent(telegramBotService.normalizeForIntent("¿Cuánto cuesta FRN-CHE-001?")));
+    }
+
+    private void stubCatalogData() {
+        CategoryDTO category = CategoryDTO.builder()
+                .id(1L)
+                .name("Sistema de Frenos")
+                .isActive(true)
+                .build();
+
+        ProductDTO product = ProductDTO.builder()
+                .id(10L)
+                .categoryId(1L)
+                .name("Pastillas de Freno Cerámicas")
+                .basePrice(new BigDecimal("85000"))
+                .isActive(true)
+                .build();
+
+        ProductVariantDTO variant = ProductVariantDTO.builder()
+                .id(100L)
+                .productId(10L)
+                .sku("FRN-CHE-001")
+                .stock(10)
+                .isActive(true)
+                .build();
+
+        when(productService.getAllActiveCategories()).thenReturn(List.of(category));
+        when(productService.getActiveProductsByCategory(1L)).thenReturn(List.of(product));
+        when(productService.getActiveVariantsByProductId(10L)).thenReturn(List.of(variant));
+    }
+
+    @Test
     void processUpdate_catalogoCommand_excludesZeroStockVariants() {
         Long chatId = 987654321L;
         TelegramUpdateDTO update = buildUpdate(chatId, "/catalogo", "Test");

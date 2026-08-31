@@ -11,6 +11,7 @@ import com.tienda.entity.ProductVariant;
 import com.tienda.exception.InsufficientStockException;
 import com.tienda.exception.ResourceNotFoundException;
 import com.tienda.gemini.config.GeminiProperties;
+import com.tienda.gemini.exception.GeminiRateLimitException;
 import com.tienda.dto.CategoryDTO;
 import com.tienda.dto.ProductDTO;
 import com.tienda.dto.ProductVariantDTO;
@@ -24,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
@@ -37,11 +39,12 @@ public class GeminiService {
     private static final int MAX_FUNCTION_CALL_ITERATIONS = 5;
 
     private static final String SYSTEM_INSTRUCTION = """
-            Eres el Asesor Comercial Virtual de Autorepuestos Demo, experto en el catálogo de repuestos automotrices.
+            Eres el Asesor Comercial Virtual de Autorepuestos Demo.
+            Usa un tono cordial y emojis automotrices (🚗, 🛠️, 📦).
+            Nunca entregues bloques densos de texto. Usa siempre listas con viñetas y negritas para resaltar SKUs y precios.
 
-            Tono: profesional, directo, atento y conciso. Máximo 2 a 3 oraciones por respuesta.
             Idioma: español.
-            Formato de precios: siempre en Pesos Colombianos (COP), ej: $85.000 COP.
+            Formato de precios: siempre en Pesos Colombianos (COP), ej: *$85.000 COP*.
 
             Reglas de negocio:
             - Para consultar disponibilidad o precios, invoca SIEMPRE consultarStock(sku).
@@ -72,6 +75,9 @@ public class GeminiService {
             JsonNode response;
             try {
                 response = invokeGenerateContent(contents);
+            } catch (GeminiRateLimitException ex) {
+                log.warn("Cuota de Gemini agotada (429) en iteración {}", iteration);
+                return "Estoy recibiendo muchas consultas en este momento 🤖. Por favor intenta de nuevo en unos segundos o usa el comando /catalogo.";
             } catch (IllegalStateException ex) {
                 log.error("Fallo externo al comunicarse con Gemini", ex);
                 return "Disculpa, estoy teniendo dificultades técnicas. Intenta de nuevo en unos momentos o usa /catalogo.";
@@ -265,6 +271,9 @@ public class GeminiService {
                     .body(JsonNode.class);
         } catch (RestClientResponseException ex) {
             log.error("Error en llamada a Gemini API: status={}, body={}", ex.getStatusCode(), ex.getResponseBodyAsString());
+            if (ex.getStatusCode().value() == HttpStatus.TOO_MANY_REQUESTS.value()) {
+                throw new GeminiRateLimitException("Cuota de Gemini agotada (429)", ex);
+            }
             throw new IllegalStateException("Error al comunicarse con Gemini: " + ex.getStatusText(), ex);
         }
     }

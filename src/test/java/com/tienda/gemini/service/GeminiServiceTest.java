@@ -58,7 +58,7 @@ class GeminiServiceTest {
     void setUp() {
         geminiProperties = new GeminiProperties();
         geminiProperties.setKey("test-key");
-        geminiProperties.setModel("gemini-2.5-flash");
+        geminiProperties.setModel("gemini-2.0-flash");
         geminiProperties.setUrl("https://generativelanguage.googleapis.com/v1beta/models");
 
         objectMapper = new ObjectMapper();
