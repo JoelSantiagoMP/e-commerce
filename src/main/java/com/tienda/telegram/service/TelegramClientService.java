@@ -1,11 +1,14 @@
 package com.tienda.telegram.service;
 
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.ResourceAccessException;
@@ -36,20 +39,117 @@ public class TelegramClientService {
                 "text", text
         );
 
+        try {
+            postToTelegram(url, payload, "sendMessage", chatId);
+        } catch (Exception ex) {
+            log.error("No se pudo enviar mensaje a Telegram chatId={}", chatId, ex);
+        }
+    }
+
+    public void sendMessageWithInlineKeyboard(Long chatId, String text, Map<String, Object> inlineKeyboard) {
+        String url = apiUrl + botToken + "/sendMessage";
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("chat_id", chatId);
+        payload.put("text", text);
+        payload.put("parse_mode", "Markdown");
+        payload.put("reply_markup", inlineKeyboard);
+
+        try {
+            postToTelegram(url, payload, "sendMessage", chatId);
+        } catch (Exception ex) {
+            log.error("No se pudo enviar mensaje con teclado inline a Telegram chatId={}", chatId, ex);
+        }
+    }
+
+    public void editMessageText(Long chatId, Long messageId, String text) {
+        String url = apiUrl + botToken + "/editMessageText";
+
+        Map<String, Object> payload = Map.of(
+                "chat_id", chatId,
+                "message_id", messageId,
+                "text", text,
+                "parse_mode", "Markdown"
+        );
+
+        try {
+            postToTelegram(url, payload, "editMessageText", chatId);
+        } catch (Exception ex) {
+            log.error("No se pudo editar mensaje en Telegram chatId={}, messageId={}", chatId, messageId, ex);
+        }
+    }
+
+    public void answerCallbackQuery(String callbackQueryId) {
+        String url = apiUrl + botToken + "/answerCallbackQuery";
+
+        Map<String, Object> payload = Map.of("callback_query_id", callbackQueryId);
+
+        try {
+            postToTelegram(url, payload, "answerCallbackQuery", null);
+        } catch (Exception ex) {
+            log.error("No se pudo responder callback query id={}", callbackQueryId, ex);
+        }
+    }
+
+    public Map<String, Object> buildOrderConfirmationKeyboard(String sku) {
+        return Map.of(
+                "inline_keyboard", List.of(
+                        List.of(
+                                Map.of(
+                                        "text", "✅ Confirmar Pedido",
+                                        "callback_data", "CONFIRM_ORDER:" + sku
+                                ),
+                                Map.of(
+                                        "text", "❌ Cancelar",
+                                        "callback_data", "CANCEL_ORDER"
+                                )
+                        )
+                )
+        );
+    }
+
+    public boolean setWebhook(String webhookUrl, String secretToken) {
+        String url = apiUrl + botToken + "/setWebhook";
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("url", webhookUrl);
+        payload.put("secret_token", secretToken);
+
+        try {
+            ResponseEntity<String> response = postToTelegram(url, payload, "setWebhook", null);
+            boolean success = response.getStatusCode().is2xxSuccessful();
+            if (success) {
+                log.info("Webhook de Telegram registrado con secret token: {}", webhookUrl);
+            }
+            return success;
+        } catch (Exception ex) {
+            log.error("No se pudo registrar el webhook de Telegram en {}: {}", webhookUrl, ex.getMessage(), ex);
+            return false;
+        }
+    }
+
+    private ResponseEntity<String> postToTelegram(
+            String url, Map<String, Object> payload, String operation, Long chatId) {
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         HttpEntity<Map<String, Object>> request = new HttpEntity<>(payload, headers);
 
         try {
-            restTemplate.postForEntity(url, request, String.class);
-            log.info("Mensaje enviado a Telegram chatId={}", chatId);
+            ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
+            if ("sendMessage".equals(operation)) {
+                log.info("Mensaje enviado a Telegram chatId={}", chatId);
+            }
+            return response;
         } catch (HttpClientErrorException ex) {
-            log.error("Error HTTP al enviar mensaje a Telegram chatId={}: status={}, body={}",
-                    chatId, ex.getStatusCode(), ex.getResponseBodyAsString(), ex);
+            log.error("Error HTTP en {} chatId={}: status={}, body={}",
+                    operation, chatId, ex.getStatusCode(), ex.getResponseBodyAsString(), ex);
+            throw ex;
         } catch (ResourceAccessException ex) {
-            log.error("Error de red al enviar mensaje a Telegram chatId={}: {}", chatId, ex.getMessage(), ex);
+            log.error("Error de red en {} chatId={}: {}", operation, chatId, ex.getMessage(), ex);
+            throw ex;
         } catch (Exception ex) {
-            log.error("Error inesperado al enviar mensaje a Telegram chatId={}: {}", chatId, ex.getMessage(), ex);
+            log.error("Error inesperado en {} chatId={}: {}", operation, chatId, ex.getMessage(), ex);
+            throw ex;
         }
     }
 }

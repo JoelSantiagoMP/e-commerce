@@ -31,4 +31,9 @@ management:
 telegram:
   bot:
     token: ${TELEGRAM_BOT_TOKEN:test_token}
+    username: ${TELEGRAM_BOT_USERNAME:}
     api-url: https://api.telegram.org/bot
+    webhook-secret-token: ${TELEGRAM_WEBHOOK_SECRET_TOKEN:dev-webhook-secret}
+
+app:
+  base-url: ${APP_BASE_URL:}

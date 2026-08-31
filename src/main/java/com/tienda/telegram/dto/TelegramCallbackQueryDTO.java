@@ -12,13 +12,13 @@ import lombok.Setter;
 @NoArgsConstructor
 @AllArgsConstructor
 @Builder
-public class TelegramUpdateDTO {
+public class TelegramCallbackQueryDTO {
 
-    @JsonProperty("update_id")
-    private Long updateId;
+    private String id;
+
+    private TelegramChatDTO from;
 
     private TelegramMessageDTO message;
 
-    @JsonProperty("callback_query")
-    private TelegramCallbackQueryDTO callbackQuery;
+    private String data;
 }

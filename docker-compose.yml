@@ -30,6 +30,8 @@ services:
       SPRING_DATASOURCE_USERNAME: tienda_user
       SPRING_DATASOURCE_PASSWORD: tienda_pass
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      APP_BASE_URL: ${APP_BASE_URL:-}
     depends_on:
       db:
         condition: service_healthy
