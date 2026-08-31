@@ -6,30 +6,63 @@ import { Loader } from '../ui/Loader'
 import { StockModal } from './StockModal'
 import type { Category, Product } from '../../types'
 
+const EMPTY_RETRY_ATTEMPTS = 3
+const EMPTY_RETRY_DELAY_MS = 2500
+
+function delay(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms)
+  })
+}
+
 export function ProductsView() {
   const { showError } = useToast()
   const [products, setProducts] = useState<Product[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadingLabel, setLoadingLabel] = useState('Cargando inventario...')
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState<string>('all')
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null)
 
   const loadProducts = useCallback(async () => {
     setLoading(true)
+    setLoadingLabel('Cargando inventario...')
     try {
-      const [categoriesData, productsData] = await Promise.all([
-        fetchCategories(),
-        categoryFilter === 'all'
-          ? fetchProducts()
-          : fetchProductsByCategory(Number(categoryFilter)),
-      ])
-      setCategories(categoriesData)
-      setProducts(productsData)
+      let attempt = 0
+
+      while (true) {
+        const [categoriesData, productsData] = await Promise.all([
+          fetchCategories(),
+          categoryFilter === 'all'
+            ? fetchProducts()
+            : fetchProductsByCategory(Number(categoryFilter)),
+        ])
+
+        // Durante el cold start el backend puede responder [] antes de estar listo.
+        // No asimilar vacío inmediato como "sin datos": reintentar con loading visible.
+        const looksTemporarilyEmpty =
+          categoriesData.length === 0 ||
+          (categoryFilter === 'all' && productsData.length === 0)
+
+        if (looksTemporarilyEmpty && attempt < EMPTY_RETRY_ATTEMPTS) {
+          attempt += 1
+          setLoadingLabel(
+            `Sincronizando con el servidor... (intento ${attempt}/${EMPTY_RETRY_ATTEMPTS})`,
+          )
+          await delay(EMPTY_RETRY_DELAY_MS)
+          continue
+        }
+
+        setCategories(categoriesData)
+        setProducts(productsData)
+        break
+      }
     } catch (error) {
       showError(getErrorMessage(error))
     } finally {
       setLoading(false)
+      setLoadingLabel('Cargando inventario...')
     }
   }, [categoryFilter, showError])
 
@@ -80,7 +113,7 @@ export function ProductsView() {
       </div>
 
       {loading ? (
-        <Loader fullScreen label="Cargando inventario..." />
+        <Loader fullScreen label={loadingLabel} />
       ) : filteredProducts.length === 0 ? (
         <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center text-slate-600">
           No se encontraron productos con los filtros actuales.
