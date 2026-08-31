@@ -9,6 +9,7 @@ import com.tienda.dto.ProductVariantDTO;
 import com.tienda.entity.Customer;
 import com.tienda.entity.Product;
 import com.tienda.entity.ProductVariant;
+import com.tienda.gemini.dto.GeminiChatResult;
 import com.tienda.gemini.service.GeminiService;
 import com.tienda.exception.InsufficientStockException;
 import com.tienda.exception.ResourceNotFoundException;
@@ -26,6 +27,7 @@ import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.text.Normalizer;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -42,6 +44,8 @@ public class TelegramBotService {
 
     private static final String CONFIRM_ORDER_PREFIX = "CONFIRM_ORDER:";
     private static final String SELECT_QTY_PREFIX = "SELECT_QTY:";
+    private static final String BUY_SKU_PREFIX = "BUY_SKU:";
+    private static final String SHOW_CATALOG_CALLBACK = "SHOW_CATALOG";
     private static final String CANCEL_ORDER_CALLBACK = "CANCEL_ORDER";
 
     private static final Set<String> GREETING_EXACT = Set.of(
@@ -106,11 +110,11 @@ public class TelegramBotService {
             response = switch (command) {
                 case "/start" -> handleStart(chatId, chat);
                 case "/help" -> buildMenuMessage();
-                case "/catalogo" -> handleCatalogo();
+                case "/catalogo" -> sendCatalog(chatId, messageAlreadySent);
                 case "/comprar" -> handleComprar(chatId, chat, trimmedText, messageAlreadySent);
                 default -> trimmedText.startsWith("/")
                         ? "Comando no reconocido.\n\n" + buildMenuMessage()
-                        : routeLocalIntentOrGemini(chatId, chat, trimmedText);
+                        : routeLocalIntentOrGemini(chatId, chat, trimmedText, messageAlreadySent);
             };
         } catch (ResourceNotFoundException | InsufficientStockException ex) {
             log.warn("Error de negocio en Telegram chatId={}: {}", chatId, ex.getMessage());
@@ -140,6 +144,15 @@ public class TelegramBotService {
         telegramClientService.answerCallbackQuery(callback.getId());
 
         try {
+            if (SHOW_CATALOG_CALLBACK.equals(data)) {
+                return sendCatalogEdit(chatId, messageId);
+            }
+
+            if (data != null && data.startsWith(BUY_SKU_PREFIX)) {
+                String sku = data.substring(BUY_SKU_PREFIX.length()).trim().toUpperCase();
+                return startPurchaseFromSku(chatId, messageId, callback.getMessage().getChat(), sku, true);
+            }
+
             if (data != null && data.startsWith(SELECT_QTY_PREFIX)) {
                 String payload = data.substring(SELECT_QTY_PREFIX.length()).trim();
                 String[] selectParts = payload.split(":", 2);
@@ -259,15 +272,54 @@ public class TelegramBotService {
                 También puedes escribirme en lenguaje natural: precios, stock o pedidos.""";
     }
 
-    private String handleCatalogo() {
+    private String sendCatalog(Long chatId, boolean[] messageAlreadySent) {
+        CatalogContent catalog = buildCatalogContent();
+
+        if (catalog.skus().isEmpty()) {
+            return catalog.text();
+        }
+
+        telegramClientService.sendMessageWithInlineKeyboard(
+                chatId,
+                catalog.text(),
+                telegramClientService.buildCatalogKeyboard(catalog.skus()));
+        messageAlreadySent[0] = true;
+        log.info("Catálogo enviado con {} SKUs y teclado inline. chatId={}", catalog.skus().size(), chatId);
+        return catalog.text();
+    }
+
+    private String sendCatalogEdit(Long chatId, Long messageId) {
+        CatalogContent catalog = buildCatalogContent();
+
+        if (catalog.skus().isEmpty()) {
+            telegramClientService.editMessageText(chatId, messageId, catalog.text());
+            return catalog.text();
+        }
+
+        telegramClientService.editMessageTextWithInlineKeyboard(
+                chatId,
+                messageId,
+                catalog.text(),
+                telegramClientService.buildCatalogKeyboard(catalog.skus()));
+        return catalog.text();
+    }
+
+    private record CatalogContent(String text, List<String> skus) {}
+
+    private CatalogContent buildCatalogContent() {
         List<CategoryDTO> categories = productService.getAllActiveCategories();
 
         if (categories.isEmpty()) {
             log.info("Catálogo consultado: sin categorías activas");
-            return "No hay repuestos disponibles en este momento.";
+            return new CatalogContent("📦 No hay repuestos disponibles en este momento.", List.of());
         }
 
-        StringBuilder catalog = new StringBuilder("🔧 *Catálogo de Autorepuestos*\n\n");
+        StringBuilder catalog = new StringBuilder("""
+                🛠️ *Catálogo de Autorepuestos Demo*
+                Repuestos con stock disponible. Toca 🛒 para comprar o usa /comprar SKU.
+
+                """);
+        List<String> skus = new ArrayList<>();
         boolean anyItemListed = false;
 
         for (CategoryDTO category : categories) {
@@ -277,11 +329,10 @@ public class TelegramBotService {
             }
 
             StringBuilder categorySection = new StringBuilder();
-            categorySection.append("▸ ").append(category.getName()).append("\n");
+            categorySection.append("📂 *").append(category.getName()).append("*\n\n");
 
             for (ProductDTO product : products) {
                 List<ProductVariantDTO> variants = productService.getActiveVariantsByProductId(product.getId());
-                StringBuilder variantLines = new StringBuilder();
 
                 for (ProductVariantDTO variant : variants) {
                     if (variant.getStock() == null || variant.getStock() <= 0) {
@@ -292,48 +343,81 @@ public class TelegramBotService {
                             ? variant.getPriceOverride()
                             : product.getBasePrice();
 
-                    variantLines.append("    - SKU: ").append(variant.getSku())
-                            .append(" | ").append(formatCop(price))
-                            .append(" | Stock: ").append(variant.getStock())
-                            .append("\n");
-                }
-
-                if (!variantLines.isEmpty()) {
-                    categorySection.append("  • ").append(product.getName()).append("\n");
-                    categorySection.append(variantLines).append("\n");
+                    categorySection.append(formatVariantEntry(product.getName(), variant, price)).append("\n");
+                    skus.add(variant.getSku());
                     anyItemListed = true;
                 }
             }
 
-            if (categorySection.length() > ("▸ " + category.getName() + "\n").length()) {
-                catalog.append(categorySection);
+            if (categorySection.length() > ("📂 *" + category.getName() + "*\n\n").length()) {
+                catalog.append(categorySection).append("\n");
             }
         }
 
         if (!anyItemListed) {
-            return "No hay repuestos con stock disponible en este momento.";
+            return new CatalogContent("📦 No hay repuestos con stock disponible en este momento.", List.of());
         }
 
-        catalog.append("Para pedir: /comprar SKU (selector) o /comprar SKU [CANTIDAD]");
+        catalog.append("""
+                💬 *¿Cómo pedir?*
+                • Toca un botón 🛒 debajo
+                • O escribe: /comprar SKU
+                • También puedo asesorarte en lenguaje natural 🚗""");
 
-        log.info("Catálogo generado con {} categorías activas", categories.size());
-        return catalog.toString().trim();
+        log.info("Catálogo generado con {} categorías y {} SKUs", categories.size(), skus.size());
+        return new CatalogContent(catalog.toString().trim(), List.copyOf(skus));
     }
 
-    private String routeLocalIntentOrGemini(Long chatId, TelegramChatDTO chat, String text) {
+    private String formatVariantEntry(String productName, ProductVariantDTO variant, BigDecimal price) {
+        return """
+                🚗 *%s*
+                • Aplicación: %s
+                • SKU: `%s`
+                • Precio: %s COP
+                • Disponibilidad: %d unidades"""
+                .formatted(
+                        productName,
+                        resolveApplication(variant),
+                        variant.getSku(),
+                        formatCop(price),
+                        variant.getStock());
+    }
+
+    private String resolveApplication(ProductVariantDTO variant) {
+        if (variant.getColor() != null && !variant.getColor().isBlank()) {
+            return variant.getColor();
+        }
+        if (variant.getSize() != null && !variant.getSize().isBlank()) {
+            return variant.getSize();
+        }
+        return "Consultar compatibilidad";
+    }
+
+    private String resolveApplication(ProductVariant variant) {
+        if (variant.getColor() != null && !variant.getColor().isBlank()) {
+            return variant.getColor();
+        }
+        if (variant.getSize() != null && !variant.getSize().isBlank()) {
+            return variant.getSize();
+        }
+        return "Consultar compatibilidad";
+    }
+
+    private String routeLocalIntentOrGemini(
+            Long chatId, TelegramChatDTO chat, String text, boolean[] messageAlreadySent) {
         String normalized = normalizeForIntent(text);
         LocalIntent intent = resolveLocalIntent(normalized);
 
         return switch (intent) {
             case CATALOG -> {
                 log.info("Intención local CATALOG detectada para chatId={}: '{}'", chatId, text);
-                yield handleCatalogo();
+                yield sendCatalog(chatId, messageAlreadySent);
             }
             case GREETING -> {
                 log.info("Intención local GREETING detectada para chatId={}: '{}'", chatId, text);
                 yield handleGreeting(chatId, chat);
             }
-            case NONE -> handleFreeText(chatId, chat, text);
+            case NONE -> handleFreeText(chatId, chat, text, messageAlreadySent);
         };
     }
 
@@ -385,16 +469,54 @@ public class TelegramBotService {
                 + buildMenuMessage();
     }
 
-    private String handleFreeText(Long chatId, TelegramChatDTO chat, String text) {
+    private String handleFreeText(Long chatId, TelegramChatDTO chat, String text, boolean[] messageAlreadySent) {
         Customer customer = resolveOrCreateCustomer(chatId, chat);
         log.info("Consulta en lenguaje natural de chatId={}, customerId={}", chatId, customer.getId());
 
         try {
-            return geminiService.chat(text, customer.getId());
+            GeminiChatResult result = geminiService.chat(text, customer.getId());
+
+            if (!result.suggestedSkus().isEmpty()) {
+                telegramClientService.sendMessageWithInlineKeyboard(
+                        chatId,
+                        result.message(),
+                        telegramClientService.buildSuggestedSkusKeyboard(result.suggestedSkus()));
+                messageAlreadySent[0] = true;
+            }
+
+            return result.message();
         } catch (Exception ex) {
             log.error("Error en asistente Gemini para chatId={}", chatId, ex);
             return "Disculpa, no pude procesar tu consulta. Intenta de nuevo o usa /catalogo.";
         }
+    }
+
+    private String startPurchaseFromSku(
+            Long chatId, Long messageId, TelegramChatDTO chat, String sku, boolean editExistingMessage) {
+        resolveOrCreateCustomer(chatId, chat);
+
+        ProductVariant variant = productVariantRepository.findBySku(sku)
+                .filter(v -> Boolean.TRUE.equals(v.getIsActive()))
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Repuesto no encontrado o inactivo con SKU: " + sku));
+
+        if (variant.getStock() < 1) {
+            throw new InsufficientStockException("Sin stock disponible para SKU: " + sku);
+        }
+
+        Product product = variant.getProduct();
+        String productName = product != null ? product.getName() : sku;
+        String selectionMessage = buildQuantitySelectionMessage(productName, variant, sku, variant.getStock());
+        Map<String, Object> keyboard = telegramClientService.buildQuantitySelectorKeyboard(sku);
+
+        if (editExistingMessage) {
+            telegramClientService.editMessageTextWithInlineKeyboard(chatId, messageId, selectionMessage, keyboard);
+        } else {
+            telegramClientService.sendMessageWithInlineKeyboard(chatId, selectionMessage, keyboard);
+        }
+
+        log.info("Flujo de compra iniciado vía botón inline. sku={}, chatId={}", sku, chatId);
+        return selectionMessage;
     }
 
     private String handleComprar(Long chatId, TelegramChatDTO chat, String fullText, boolean[] messageAlreadySent) {
@@ -420,7 +542,7 @@ public class TelegramBotService {
         String productName = product != null ? product.getName() : sku;
 
         if (!hasQuantitySpecified(parts)) {
-            String selectionMessage = buildQuantitySelectionMessage(productName, sku, variant.getStock());
+            String selectionMessage = buildQuantitySelectionMessage(productName, variant, sku, variant.getStock());
             Map<String, Object> keyboard = telegramClientService.buildQuantitySelectorKeyboard(sku);
 
             telegramClientService.sendMessageWithInlineKeyboard(chatId, selectionMessage, keyboard);
@@ -465,15 +587,17 @@ public class TelegramBotService {
         return summaryMessage;
     }
 
-    private String buildQuantitySelectionMessage(String productName, String sku, int availableStock) {
+    private String buildQuantitySelectionMessage(
+            String productName, ProductVariant variant, String sku, int availableStock) {
         return """
                 🛒 *Selecciona la cantidad*
-                • *Producto:* %s
-                • *SKU:* %s
-                • *Stock disponible:* %d
-                
+                🚗 *%s*
+                • Aplicación: %s
+                • SKU: `%s`
+                • Stock disponible: %d unidades
+
                 Elige una opción rápida o usa /comprar %s [CANTIDAD]"""
-                .formatted(productName, sku, availableStock, sku);
+                .formatted(productName, resolveApplication(variant), sku, availableStock, sku);
     }
 
     private int parsePositiveQuantity(String rawQuantity) {

@@ -10,6 +10,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.tienda.config.MetricsConfig;
+import com.tienda.gemini.dto.GeminiChatResult;
 import com.tienda.gemini.service.GeminiService;
 import com.tienda.dto.CategoryDTO;
 import com.tienda.dto.OrderDTO;
@@ -131,6 +132,7 @@ class TelegramBotServiceTest {
                 .id(100L)
                 .productId(10L)
                 .sku("FRN-CHE-001")
+                .color("Corsa / Aveo 1.4")
                 .stock(10)
                 .isActive(true)
                 .build();
@@ -138,16 +140,20 @@ class TelegramBotServiceTest {
         when(productService.getAllActiveCategories()).thenReturn(List.of(category));
         when(productService.getActiveProductsByCategory(1L)).thenReturn(List.of(product));
         when(productService.getActiveVariantsByProductId(10L)).thenReturn(List.of(variant));
+        when(telegramClientService.buildCatalogKeyboard(List.of("FRN-CHE-001")))
+                .thenReturn(Map.of("inline_keyboard", List.of()));
 
         String response = telegramBotService.processUpdate(update);
 
         assertTrue(response.contains("Catálogo de Autorepuestos"));
         assertTrue(response.contains("Pastillas de Freno Cerámicas"));
         assertTrue(response.contains("FRN-CHE-001"));
+        assertTrue(response.contains("Corsa / Aveo 1.4"));
         verify(productService).getAllActiveCategories();
         verify(productService).getActiveProductsByCategory(1L);
         verify(productService).getActiveVariantsByProductId(10L);
-        verify(telegramClientService).sendMessage(eq(chatId), eq(response));
+        verify(telegramClientService).sendMessageWithInlineKeyboard(eq(chatId), eq(response), any());
+        verify(telegramClientService, never()).sendMessage(eq(chatId), eq(response));
         assertEquals(1.0, meterRegistry.counter(
                 MetricsConfig.TELEGRAM_COMMANDS_METRIC, "command", "catalogo").count());
     }
@@ -169,7 +175,7 @@ class TelegramBotServiceTest {
 
         assertTrue(response.contains("Selecciona la cantidad"));
         assertTrue(response.contains("Pastillas de Freno Cerámicas"));
-        assertTrue(response.contains("Stock disponible:* 5"));
+        assertTrue(response.contains("Stock disponible: 5 unidades"));
         verify(telegramClientService).buildQuantitySelectorKeyboard("FRN-CHE-001");
         verify(telegramClientService).sendMessageWithInlineKeyboard(eq(chatId), eq(response), eq(keyboard));
         verify(telegramClientService, never()).buildOrderConfirmationKeyboard(any(), anyInt());
@@ -350,13 +356,17 @@ class TelegramBotServiceTest {
         Customer customer = buildCustomer(chatId);
         when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
         when(geminiService.chat("¿Cuánto cuesta FRN-CHE-001?", customer.getId()))
-                .thenReturn("El repuesto FRN-CHE-001 cuesta $85.000 COP y hay 15 unidades disponibles.");
+                .thenReturn(new GeminiChatResult(
+                        "El repuesto FRN-CHE-001 cuesta $85.000 COP y hay 15 unidades disponibles.",
+                        List.of("FRN-CHE-001")));
+        when(telegramClientService.buildSuggestedSkusKeyboard(List.of("FRN-CHE-001")))
+                .thenReturn(Map.of("inline_keyboard", List.of()));
 
         String response = telegramBotService.processUpdate(update);
 
         assertTrue(response.contains("$85.000 COP"));
         verify(geminiService).chat("¿Cuánto cuesta FRN-CHE-001?", customer.getId());
-        verify(telegramClientService).sendMessage(eq(chatId), eq(response));
+        verify(telegramClientService).sendMessageWithInlineKeyboard(eq(chatId), eq(response), any());
     }
 
     @Test
@@ -431,6 +441,7 @@ class TelegramBotServiceTest {
                 .id(100L)
                 .productId(10L)
                 .sku("FRN-CHE-001")
+                .color("Corsa / Aveo 1.4")
                 .stock(10)
                 .isActive(true)
                 .build();
@@ -438,6 +449,8 @@ class TelegramBotServiceTest {
         when(productService.getAllActiveCategories()).thenReturn(List.of(category));
         when(productService.getActiveProductsByCategory(1L)).thenReturn(List.of(product));
         when(productService.getActiveVariantsByProductId(10L)).thenReturn(List.of(variant));
+        when(telegramClientService.buildCatalogKeyboard(List.of("FRN-CHE-001")))
+                .thenReturn(Map.of("inline_keyboard", List.of()));
     }
 
     @Test
@@ -478,6 +491,8 @@ class TelegramBotServiceTest {
         when(productService.getAllActiveCategories()).thenReturn(List.of(category));
         when(productService.getActiveProductsByCategory(1L)).thenReturn(List.of(product));
         when(productService.getActiveVariantsByProductId(10L)).thenReturn(List.of(inStock, outOfStock));
+        when(telegramClientService.buildCatalogKeyboard(List.of("FRN-CHE-001")))
+                .thenReturn(Map.of("inline_keyboard", List.of()));
 
         String response = telegramBotService.processUpdate(update);
 
@@ -522,6 +537,7 @@ class TelegramBotServiceTest {
                 .id(1L)
                 .product(product)
                 .sku(sku)
+                .color("Corsa / Aveo 1.4")
                 .stock(stock)
                 .isActive(true)
                 .build();

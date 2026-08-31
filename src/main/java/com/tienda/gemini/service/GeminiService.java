@@ -11,6 +11,7 @@ import com.tienda.entity.ProductVariant;
 import com.tienda.exception.InsufficientStockException;
 import com.tienda.exception.ResourceNotFoundException;
 import com.tienda.gemini.config.GeminiProperties;
+import com.tienda.gemini.dto.GeminiChatResult;
 import com.tienda.gemini.exception.GeminiRateLimitException;
 import com.tienda.dto.CategoryDTO;
 import com.tienda.dto.ProductDTO;
@@ -40,18 +41,30 @@ public class GeminiService {
 
     private static final String SYSTEM_INSTRUCTION = """
             Eres el Asesor Comercial Virtual de Autorepuestos Demo.
-            Usa un tono cordial y emojis automotrices (🚗, 🛠️, 📦).
-            Nunca entregues bloques densos de texto. Usa siempre listas con viñetas y negritas para resaltar SKUs y precios.
+            Tono: comercial, servicial, claro y profesional. Explica con naturalidad cómo realizar pedidos sin recortar contexto útil.
+            Usa emojis automotrices (🚗, 🛠️, 📦) con moderación.
 
             Idioma: español.
             Formato de precios: siempre en Pesos Colombianos (COP), ej: *$85.000 COP*.
 
+            Formato OBLIGATORIO para cada repuesto (catálogo, consultas o recomendaciones):
+
+            🚗 **[Nombre del Producto]**
+            • Aplicación: [Modelos de vehículo compatibles]
+            • SKU: `[SKU]`
+            • Precio: $[Monto] COP
+            • Disponibilidad: [Unidades] unidades
+
+            Reglas de presentación:
+            - Nunca entregues bloques densos de texto; usa viñetas y negritas para SKUs y precios.
+            - SIEMPRE incluye el campo Aplicación/compatibilidad vehicular cuando la herramienta lo provea.
+            - Al finalizar un catálogo o recomendación, indica cómo pedir: tocar el botón 🛒, /comprar SKU o escribir el SKU deseado.
+
             Reglas de negocio:
             - Para consultar disponibilidad o precios, invoca SIEMPRE consultarStock(sku).
             - Para mostrar el catálogo, invoca SIEMPRE listarCatalogo().
-            - NUNCA inventes precios, stock ni SKUs no provistos por las herramientas.
+            - NUNCA inventes precios, stock, SKUs ni compatibilidades no provistos por las herramientas.
             - Si el cliente confirma compra con SKU y cantidad, invoca crearOrden(sku, cantidad).
-            - La cantidad puede ser cualquier entero positivo; valida stock antes de confirmar.
             - Si una herramienta devuelve error=true, comunica el mensaje al cliente sin inventar datos.
             - Si un producto tiene stock 0, indícalo como no disponible y no lo ofrezcas en el catálogo.
             """;
@@ -63,11 +76,12 @@ public class GeminiService {
     private final OrderService orderService;
     private final ObjectMapper objectMapper;
 
-    public String chat(String userMessage, Long customerId) {
+    public GeminiChatResult chat(String userMessage, Long customerId) {
         if (userMessage == null || userMessage.isBlank()) {
-            return "Por favor, escribe tu consulta.";
+            return GeminiChatResult.textOnly("Por favor, escribe tu consulta.");
         }
 
+        List<String> suggestedSkus = new ArrayList<>();
         ArrayNode contents = objectMapper.createArrayNode();
         contents.add(buildUserContent(userMessage.trim()));
 
@@ -77,28 +91,30 @@ public class GeminiService {
                 response = invokeGenerateContent(contents);
             } catch (GeminiRateLimitException ex) {
                 log.warn("Cuota de Gemini agotada (429) en iteración {}", iteration);
-                return "Estoy recibiendo muchas consultas en este momento 🤖. Por favor intenta de nuevo en unos segundos o usa el comando /catalogo.";
+                return GeminiChatResult.textOnly(
+                        "Estoy recibiendo muchas consultas en este momento 🤖. Por favor intenta de nuevo en unos segundos o usa el comando /catalogo.");
             } catch (IllegalStateException ex) {
                 log.error("Fallo externo al comunicarse con Gemini", ex);
-                return "Disculpa, estoy teniendo dificultades técnicas. Intenta de nuevo en unos momentos o usa /catalogo.";
+                return GeminiChatResult.textOnly(
+                        "Disculpa, estoy teniendo dificultades técnicas. Intenta de nuevo en unos momentos o usa /catalogo.");
             }
             JsonNode candidate = firstCandidate(response);
 
             if (candidate == null) {
                 log.warn("Gemini no devolvió candidatos. response={}", response);
-                return "No pude procesar tu solicitud en este momento. Intenta de nuevo.";
+                return GeminiChatResult.textOnly("No pude procesar tu solicitud en este momento. Intenta de nuevo.");
             }
 
             JsonNode modelContent = candidate.path("content");
             ArrayNode modelParts = extractParts(modelContent);
             if (modelParts.isEmpty()) {
-                return "No recibí una respuesta válida del asistente.";
+                return GeminiChatResult.textOnly("No recibí una respuesta válida del asistente.");
             }
 
             List<JsonNode> functionCalls = extractFunctionCalls(modelParts);
             if (functionCalls.isEmpty()) {
-                return extractTextResponse(modelParts)
-                        .orElse("No pude generar una respuesta.");
+                String text = extractTextResponse(modelParts).orElse("No pude generar una respuesta.");
+                return new GeminiChatResult(text, List.copyOf(suggestedSkus));
             }
 
             contents.add(modelContent);
@@ -108,6 +124,7 @@ public class GeminiService {
                 String functionName = functionCall.path("name").asText();
                 JsonNode args = functionCall.path("args");
                 Map<String, Object> result = executeFunction(functionName, args, customerId);
+                collectSuggestedSkus(functionName, result, suggestedSkus);
 
                 ObjectNode functionResponse = objectMapper.createObjectNode();
                 functionResponse.put("name", functionName);
@@ -121,7 +138,27 @@ public class GeminiService {
             contents.add(functionResponseContent);
         }
 
-        return "Se alcanzó el límite de operaciones. Intenta simplificar tu solicitud.";
+        return GeminiChatResult.textOnly("Se alcanzó el límite de operaciones. Intenta simplificar tu solicitud.");
+    }
+
+    @SuppressWarnings("unchecked")
+    private void collectSuggestedSkus(String functionName, Map<String, Object> result, List<String> suggestedSkus) {
+        if (Boolean.TRUE.equals(result.get("error"))) {
+            return;
+        }
+        if ("consultarStock".equals(functionName) && result.get("sku") != null) {
+            suggestedSkus.add(result.get("sku").toString());
+        }
+        if ("listarCatalogo".equals(functionName) && result.get("items") instanceof List<?> items) {
+            for (Object item : items) {
+                if (item instanceof Map<?, ?> map && map.get("sku") != null) {
+                    suggestedSkus.add(map.get("sku").toString());
+                }
+            }
+        }
+        if ("crearOrden".equals(functionName) && result.get("sku") != null) {
+            suggestedSkus.add(result.get("sku").toString());
+        }
     }
 
     Map<String, Object> executeFunction(String functionName, JsonNode args, Long customerId) {
@@ -166,6 +203,8 @@ public class GeminiService {
                     item.put("sku", variant.getSku());
                     item.put("stock", variant.getStock());
                     item.put("price", price);
+                    item.put("application", resolveApplication(variant));
+                    item.put("position", variant.getSize());
                     item.put("compatibility", variant.getColor());
                     items.add(item);
                 }
@@ -192,9 +231,30 @@ public class GeminiService {
         result.put("stock", variant.getStock());
         result.put("price", price);
         result.put("available", variant.getStock() > 0);
-        result.put("size", variant.getSize());
-        result.put("color", variant.getColor());
+        result.put("application", resolveApplication(variant));
+        result.put("position", variant.getSize());
+        result.put("compatibility", variant.getColor());
         return result;
+    }
+
+    private String resolveApplication(ProductVariantDTO variant) {
+        if (variant.getColor() != null && !variant.getColor().isBlank()) {
+            return variant.getColor();
+        }
+        if (variant.getSize() != null && !variant.getSize().isBlank()) {
+            return variant.getSize();
+        }
+        return "Consultar compatibilidad";
+    }
+
+    private String resolveApplication(ProductVariant variant) {
+        if (variant.getColor() != null && !variant.getColor().isBlank()) {
+            return variant.getColor();
+        }
+        if (variant.getSize() != null && !variant.getSize().isBlank()) {
+            return variant.getSize();
+        }
+        return "Consultar compatibilidad";
     }
 
     private Map<String, Object> crearOrden(String rawSku, int cantidad, Long customerId) {

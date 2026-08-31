@@ -1,5 +1,6 @@
 package com.tienda.telegram.service;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,10 +35,10 @@ public class TelegramClientService {
     public void sendMessage(Long chatId, String text) {
         String url = apiUrl + botToken + "/sendMessage";
 
-        Map<String, Object> payload = Map.of(
-                "chat_id", chatId,
-                "text", text
-        );
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("chat_id", chatId);
+        payload.put("text", text);
+        payload.put("parse_mode", "Markdown");
 
         try {
             postToTelegram(url, payload, "sendMessage", chatId);
@@ -137,6 +138,52 @@ public class TelegramClientService {
                                 )
                         )
                 )
+        );
+    }
+
+    /**
+     * Teclado para catálogo: botones de compra por SKU y acceso rápido al catálogo completo.
+     */
+    public Map<String, Object> buildCatalogKeyboard(List<String> skus) {
+        List<List<Map<String, String>>> rows = new ArrayList<>();
+
+        for (int index = 0; index < skus.size(); index += 2) {
+            List<Map<String, String>> row = new ArrayList<>();
+            row.add(buildBuySkuButton(skus.get(index)));
+            if (index + 1 < skus.size()) {
+                row.add(buildBuySkuButton(skus.get(index + 1)));
+            }
+            rows.add(row);
+        }
+
+        rows.add(List.of(
+                Map.of("text", "📋 Ver Catálogo Completo", "callback_data", "SHOW_CATALOG")
+        ));
+
+        return Map.of("inline_keyboard", rows);
+    }
+
+    /**
+     * Teclado contextual tras consultas Gemini: compra del SKU y catálogo.
+     */
+    public Map<String, Object> buildSuggestedSkusKeyboard(List<String> skus) {
+        List<List<Map<String, String>>> rows = new ArrayList<>();
+
+        for (String sku : skus.stream().distinct().limit(6).toList()) {
+            rows.add(List.of(buildBuySkuButton(sku)));
+        }
+
+        rows.add(List.of(
+                Map.of("text", "📋 Ver Catálogo Completo", "callback_data", "SHOW_CATALOG")
+        ));
+
+        return Map.of("inline_keyboard", rows);
+    }
+
+    private Map<String, String> buildBuySkuButton(String sku) {
+        return Map.of(
+                "text", "🛒 Comprar " + sku,
+                "callback_data", "BUY_SKU:" + sku
         );
     }
 
