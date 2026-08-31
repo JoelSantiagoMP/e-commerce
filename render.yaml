@@ -27,6 +27,8 @@ services:
         sync: false
       - key: TELEGRAM_WEBHOOK_SECRET_TOKEN
         generateValue: true
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
       # Opcional: sobrescribe RENDER_EXTERNAL_URL si usas dominio custom
       # - key: APP_BASE_URL
       #   value: https://api.tudominio.com
