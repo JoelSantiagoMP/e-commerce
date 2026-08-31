@@ -67,4 +67,16 @@ class TelegramWebhookInitializerTest {
 
         verify(telegramClientService, never()).setWebhook(WEBHOOK_URL, WEBHOOK_SECRET);
     }
+
+    @Test
+    void registerWebhookOnStartup_renderExternalUrl_registersWebhook() {
+        ReflectionTestUtils.setField(initializer, "appBaseUrl", "https://e-commerce-backend.onrender.com");
+
+        String renderWebhookUrl = "https://e-commerce-backend.onrender.com/api/v1/telegram/webhook";
+        when(telegramClientService.setWebhook(renderWebhookUrl, WEBHOOK_SECRET)).thenReturn(true);
+
+        initializer.registerWebhookOnStartup();
+
+        verify(telegramClientService).setWebhook(renderWebhookUrl, WEBHOOK_SECRET);
+    }
 }

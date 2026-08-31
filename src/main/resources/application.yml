@@ -3,21 +3,21 @@ spring:
     name: e-commerce
 
   datasource:
-    url: jdbc:mysql://localhost:3306/ecommerce_db?useSSL=false&serverTimezone=UTC
-    username: ${DB_USERNAME:root}
-    password: ${DB_PASSWORD:root}
+    url: ${DB_URL:jdbc:mysql://localhost:3306/defaultdb?sslMode=REQUIRED&allowPublicKeyRetrieval=true}
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver
 
   jpa:
     hibernate:
       ddl-auto: validate
-    show-sql: true
+    show-sql: false
     properties:
       hibernate:
-        format_sql: true
+        dialect: org.hibernate.dialect.MySQL8Dialect
 
 server:
-  port: 8080
+  port: ${PORT:${SERVER_PORT:8080}}
 
 management:
   endpoints:
@@ -36,4 +36,11 @@ telegram:
     webhook-secret-token: ${TELEGRAM_WEBHOOK_SECRET_TOKEN:dev-webhook-secret}
 
 app:
-  base-url: ${APP_BASE_URL:}
+  # Prioridad: APP_BASE_URL > APP_URL > RENDER_EXTERNAL_URL (Render lo inyecta en producción)
+  base-url: ${APP_BASE_URL:${APP_URL:${RENDER_EXTERNAL_URL:}}}
+
+gemini:
+  api:
+    key: ${GEMINI_API_KEY:}
+    model: gemini-2.5-flash
+    url: https://generativelanguage.googleapis.com/v1beta/models

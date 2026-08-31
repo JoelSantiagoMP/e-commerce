@@ -36,9 +36,10 @@ services:
       - "8080:8080"
     environment:
       JAVA_OPTS: -Xms128m -Xmx384m
-      SPRING_DATASOURCE_URL: jdbc:mysql://db:3306/tienda_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
-      SPRING_DATASOURCE_USERNAME: tienda_user
-      SPRING_DATASOURCE_PASSWORD: tienda_pass
+      DB_URL: jdbc:mysql://db:3306/tienda_db?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC
+      DB_USER: tienda_user
+      DB_PASSWORD: tienda_pass
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
       APP_BASE_URL: ${APP_BASE_URL:-}

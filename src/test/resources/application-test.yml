@@ -21,3 +21,9 @@ telegram:
 
 app:
   base-url:
+
+gemini:
+  api:
+    key: test_gemini_key
+    model: gemini-2.5-flash
+    url: https://generativelanguage.googleapis.com/v1beta/models

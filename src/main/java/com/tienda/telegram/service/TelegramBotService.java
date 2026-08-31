@@ -9,6 +9,7 @@ import com.tienda.dto.ProductVariantDTO;
 import com.tienda.entity.Customer;
 import com.tienda.entity.Product;
 import com.tienda.entity.ProductVariant;
+import com.tienda.gemini.service.GeminiService;
 import com.tienda.exception.InsufficientStockException;
 import com.tienda.exception.ResourceNotFoundException;
 import com.tienda.repository.CustomerRepository;
@@ -46,6 +47,7 @@ public class TelegramBotService {
     private final CustomerRepository customerRepository;
     private final ProductVariantRepository productVariantRepository;
     private final TelegramClientService telegramClientService;
+    private final GeminiService geminiService;
     private final MeterRegistry meterRegistry;
 
     @Value("${telegram.bot.username:Autorepuestosdemo_bot}")
@@ -92,11 +94,12 @@ public class TelegramBotService {
         try {
             response = switch (command) {
                 case "/start" -> handleStart(chatId, chat);
+                case "/help" -> buildMenuMessage();
                 case "/catalogo" -> handleCatalogo();
                 case "/comprar" -> handleComprar(chatId, chat, trimmedText, messageAlreadySent);
                 default -> trimmedText.startsWith("/")
                         ? "Comando no reconocido.\n\n" + buildMenuMessage()
-                        : buildMenuMessage();
+                        : handleFreeText(chatId, chat, trimmedText);
             };
         } catch (ResourceNotFoundException | InsufficientStockException ex) {
             log.warn("Error de negocio en Telegram chatId={}: {}", chatId, ex.getMessage());
@@ -239,9 +242,10 @@ public class TelegramBotService {
                 
                 /catalogo — Ver pastillas, filtros, amortiguadores y más
                 /comprar SKU [CANTIDAD] — Simular pedido (ej: /comprar FRN-CHE-001 o /comprar FRN-CHE-001 3)
-                /start — Ver este menú
+                /help — Ver este menú
+                /start — Bienvenida
                 
-                Repuestos disponibles: frenos, lubricantes y suspensión.""";
+                También puedes escribirme en lenguaje natural: precios, stock o pedidos.""";
     }
 
     private String handleCatalogo() {
@@ -253,40 +257,68 @@ public class TelegramBotService {
         }
 
         StringBuilder catalog = new StringBuilder("🔧 *Catálogo de Autorepuestos*\n\n");
+        boolean anyItemListed = false;
 
         for (CategoryDTO category : categories) {
             List<ProductDTO> products = productService.getActiveProductsByCategory(category.getId());
-
             if (products.isEmpty()) {
                 continue;
             }
 
-            catalog.append("▸ ").append(category.getName()).append("\n");
+            StringBuilder categorySection = new StringBuilder();
+            categorySection.append("▸ ").append(category.getName()).append("\n");
 
             for (ProductDTO product : products) {
-                catalog.append("  • ").append(product.getName()).append("\n");
-
                 List<ProductVariantDTO> variants = productService.getActiveVariantsByProductId(product.getId());
+                StringBuilder variantLines = new StringBuilder();
 
                 for (ProductVariantDTO variant : variants) {
+                    if (variant.getStock() == null || variant.getStock() <= 0) {
+                        continue;
+                    }
+
                     BigDecimal price = variant.getPriceOverride() != null
                             ? variant.getPriceOverride()
                             : product.getBasePrice();
 
-                    catalog.append("    - SKU: ").append(variant.getSku())
-                            .append(" | $").append(price)
+                    variantLines.append("    - SKU: ").append(variant.getSku())
+                            .append(" | ").append(formatCop(price))
                             .append(" | Stock: ").append(variant.getStock())
                             .append("\n");
                 }
 
-                catalog.append("\n");
+                if (!variantLines.isEmpty()) {
+                    categorySection.append("  • ").append(product.getName()).append("\n");
+                    categorySection.append(variantLines).append("\n");
+                    anyItemListed = true;
+                }
             }
+
+            if (categorySection.length() > ("▸ " + category.getName() + "\n").length()) {
+                catalog.append(categorySection);
+            }
+        }
+
+        if (!anyItemListed) {
+            return "No hay repuestos con stock disponible en este momento.";
         }
 
         catalog.append("Para pedir: /comprar SKU (selector) o /comprar SKU [CANTIDAD]");
 
         log.info("Catálogo generado con {} categorías activas", categories.size());
         return catalog.toString().trim();
+    }
+
+    private String handleFreeText(Long chatId, TelegramChatDTO chat, String text) {
+        Customer customer = resolveOrCreateCustomer(chatId, chat);
+        log.info("Consulta en lenguaje natural de chatId={}, customerId={}", chatId, customer.getId());
+
+        try {
+            return geminiService.chat(text, customer.getId());
+        } catch (Exception ex) {
+            log.error("Error en asistente Gemini para chatId={}", chatId, ex);
+            return "Disculpa, no pude procesar tu consulta. Intenta de nuevo o usa /catalogo.";
+        }
     }
 
     private String handleComprar(Long chatId, TelegramChatDTO chat, String fullText, boolean[] messageAlreadySent) {
@@ -460,6 +492,7 @@ public class TelegramBotService {
     private void recordTelegramCommand(String command) {
         String commandTag = switch (command) {
             case "/start" -> "start";
+            case "/help" -> "help";
             case "/catalogo" -> "catalogo";
             case "/comprar" -> "comprar";
             default -> "unknown";

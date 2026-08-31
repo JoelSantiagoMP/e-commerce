@@ -1,8 +1,0 @@
-/Users/joelsantiagomartinezpinzon/Documents/e-commerce/e-commerce/src/test/java/com/tienda/integration/OrderIntegrationTest.java
-/Users/joelsantiagomartinezpinzon/Documents/e-commerce/e-commerce/src/test/java/com/tienda/repository/DataRepositoryTest.java
-/Users/joelsantiagomartinezpinzon/Documents/e-commerce/e-commerce/src/test/java/com/tienda/telegram/config/TelegramWebhookInitializerTest.java
-/Users/joelsantiagomartinezpinzon/Documents/e-commerce/e-commerce/src/test/java/com/tienda/telegram/controller/TelegramWebhookControllerTest.java
-/Users/joelsantiagomartinezpinzon/Documents/e-commerce/e-commerce/src/test/java/com/tienda/telegram/security/TelegramWebhookSecretTokenValidatorTest.java
-/Users/joelsantiagomartinezpinzon/Documents/e-commerce/e-commerce/src/test/java/com/tienda/telegram/service/TelegramBotServiceTest.java
-/Users/joelsantiagomartinezpinzon/Documents/e-commerce/e-commerce/src/test/java/com/tienda/telegram/service/TelegramClientServiceTest.java
-/Users/joelsantiagomartinezpinzon/Documents/e-commerce/e-commerce/src/test/java/com/tienda/telegram/service/TelegramUpdateDeduplicationServiceTest.java

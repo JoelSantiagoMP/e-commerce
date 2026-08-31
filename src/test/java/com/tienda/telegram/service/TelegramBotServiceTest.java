@@ -10,6 +10,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.tienda.config.MetricsConfig;
+import com.tienda.gemini.service.GeminiService;
 import com.tienda.dto.CategoryDTO;
 import com.tienda.dto.OrderDTO;
 import com.tienda.dto.OrderItemRequestDTO;
@@ -59,6 +60,9 @@ class TelegramBotServiceTest {
     @Mock
     private TelegramClientService telegramClientService;
 
+    @Mock
+    private GeminiService geminiService;
+
     private SimpleMeterRegistry meterRegistry;
 
     private TelegramBotService telegramBotService;
@@ -72,6 +76,7 @@ class TelegramBotServiceTest {
                 customerRepository,
                 productVariantRepository,
                 telegramClientService,
+                geminiService,
                 meterRegistry
         );
         ReflectionTestUtils.setField(telegramBotService, "botUsername", "Autorepuestosdemo_bot");
@@ -335,6 +340,69 @@ class TelegramBotServiceTest {
         verify(telegramClientService).answerCallbackQuery("callback-456");
         verify(telegramClientService).editMessageText(eq(chatId), eq(messageId), eq(response));
         verify(orderService, never()).createOrder(any(), any());
+    }
+
+    @Test
+    void processUpdate_freeTextMessage_invokesGeminiAndSendsResponse() {
+        Long chatId = 777888999L;
+        TelegramUpdateDTO update = buildUpdate(chatId, "¿Cuánto cuesta FRN-CHE-001?", "Cliente");
+
+        Customer customer = buildCustomer(chatId);
+        when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
+        when(geminiService.chat("¿Cuánto cuesta FRN-CHE-001?", customer.getId()))
+                .thenReturn("El repuesto FRN-CHE-001 cuesta $85.000 COP y hay 15 unidades disponibles.");
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("$85.000 COP"));
+        verify(geminiService).chat("¿Cuánto cuesta FRN-CHE-001?", customer.getId());
+        verify(telegramClientService).sendMessage(eq(chatId), eq(response));
+    }
+
+    @Test
+    void processUpdate_catalogoCommand_excludesZeroStockVariants() {
+        Long chatId = 987654321L;
+        TelegramUpdateDTO update = buildUpdate(chatId, "/catalogo", "Test");
+
+        CategoryDTO category = CategoryDTO.builder()
+                .id(1L)
+                .name("Sistema de Frenos")
+                .isActive(true)
+                .build();
+
+        ProductDTO product = ProductDTO.builder()
+                .id(10L)
+                .categoryId(1L)
+                .name("Pastillas de Freno Cerámicas")
+                .basePrice(new BigDecimal("85000"))
+                .isActive(true)
+                .build();
+
+        ProductVariantDTO inStock = ProductVariantDTO.builder()
+                .id(100L)
+                .productId(10L)
+                .sku("FRN-CHE-001")
+                .stock(10)
+                .isActive(true)
+                .build();
+
+        ProductVariantDTO outOfStock = ProductVariantDTO.builder()
+                .id(101L)
+                .productId(10L)
+                .sku("FRN-REN-002")
+                .stock(0)
+                .isActive(true)
+                .build();
+
+        when(productService.getAllActiveCategories()).thenReturn(List.of(category));
+        when(productService.getActiveProductsByCategory(1L)).thenReturn(List.of(product));
+        when(productService.getActiveVariantsByProductId(10L)).thenReturn(List.of(inStock, outOfStock));
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("FRN-CHE-001"));
+        assertTrue(response.contains("$85.000"));
+        assertTrue(!response.contains("FRN-REN-002"));
     }
 
     @Test

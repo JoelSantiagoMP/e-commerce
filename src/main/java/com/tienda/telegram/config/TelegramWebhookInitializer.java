@@ -34,14 +34,15 @@ public class TelegramWebhookInitializer {
         }
 
         if (appBaseUrl == null || appBaseUrl.isBlank()) {
-            log.warn("Webhook de Telegram omitido: APP_BASE_URL no configurado.");
+            log.warn(
+                    "Webhook de Telegram omitido: configure APP_BASE_URL, APP_URL o RENDER_EXTERNAL_URL.");
             return;
         }
 
         String normalizedBaseUrl = appBaseUrl.replaceAll("/+$", "");
         String webhookUrl = normalizedBaseUrl + "/api/v1/telegram/webhook";
 
-        log.info("Registrando webhook de Telegram en: {}", webhookUrl);
+        log.info("Registrando webhook de Telegram en producción: {}", webhookUrl);
         boolean registered = telegramClientService.setWebhook(webhookUrl, webhookSecretToken);
 
         if (!registered) {

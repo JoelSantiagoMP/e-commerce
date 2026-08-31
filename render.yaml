@@ -1,0 +1,32 @@
+# Blueprint Render — https://render.com/docs/blueprint-spec
+# Despliegue: conectar el repo y Render detectará este archivo, o crear Web Service manualmente con Docker.
+
+services:
+  - type: web
+    name: e-commerce-backend
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /actuator/health
+    envVars:
+      # Render inyecta PORT y RENDER_EXTERNAL_URL automáticamente en runtime.
+      - key: SERVER_PORT
+        value: "8080"
+      - key: DB_URL
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET_TOKEN
+        generateValue: true
+      # Opcional: sobrescribe RENDER_EXTERNAL_URL si usas dominio custom
+      # - key: APP_BASE_URL
+      #   value: https://api.tudominio.com
