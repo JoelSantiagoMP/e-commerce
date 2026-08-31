@@ -12,6 +12,7 @@ import com.tienda.exception.InsufficientStockException;
 import com.tienda.exception.ResourceNotFoundException;
 import com.tienda.gemini.config.GeminiProperties;
 import com.tienda.gemini.dto.GeminiChatResult;
+import com.tienda.telegram.dto.PendingOrderLine;
 import com.tienda.gemini.exception.GeminiRateLimitException;
 import com.tienda.dto.CategoryDTO;
 import com.tienda.dto.ProductDTO;
@@ -58,13 +59,18 @@ public class GeminiService {
             Reglas de presentación:
             - Nunca entregues bloques densos de texto; usa viñetas y negritas para SKUs y precios.
             - SIEMPRE incluye el campo Aplicación/compatibilidad vehicular cuando la herramienta lo provea.
-            - Al finalizar un catálogo o recomendación, indica cómo pedir: tocar el botón 🛒, /comprar SKU o escribir el SKU deseado.
+            - Al finalizar un catálogo o recomendación, invita al cliente a confirmar en lenguaje natural \
+              (por ejemplo "los quiero", "dame ambos") o a tocar el botón 🛒. No exijas que escriba el SKU.
 
             Reglas de negocio:
             - Para consultar disponibilidad o precios, invoca SIEMPRE consultarStock(sku).
             - Para mostrar el catálogo o buscar repuestos por vehículo/nombre sin SKU, invoca SIEMPRE listarCatalogo().
             - NUNCA inventes precios, stock, SKUs ni compatibilidades no provistos por las herramientas.
-            - Si el cliente confirma compra con SKU y cantidad, invoca crearOrden(sku, cantidad). Si no indica cantidad, usa 1.
+            - Si el cliente confirma compra con SKU y cantidad explícitos, invoca crearOrden(sku, cantidad). Si no indica cantidad, usa 1.
+            - Si el cliente confirma productos ya mostrados (por ejemplo "ambos", "los 2", "los que me mostraste", "sí los quiero"),
+              NUNCA pidas el SKU. Resume el pedido e invoca prepararPedido con los SKUs inferidos y cantidad 1 por defecto
+              (o la cantidad que el cliente haya indicado).
+            - Cuando el cliente confirme un pedido pendiente ("sí", "dale", "confirmo"), invoca confirmarPedido.
             - Si una herramienta devuelve error=true, comunica el mensaje al cliente sin inventar datos.
             - Si un producto tiene stock 0, indícalo como no disponible y no lo ofrezcas en el catálogo.
             """;
@@ -77,13 +83,18 @@ public class GeminiService {
     private final ObjectMapper objectMapper;
 
     public GeminiChatResult chat(String userMessage, Long customerId) {
+        return chat(userMessage, customerId, "");
+    }
+
+    public GeminiChatResult chat(String userMessage, Long customerId, String conversationContext) {
         if (userMessage == null || userMessage.isBlank()) {
             return GeminiChatResult.textOnly("Por favor, escribe tu consulta.");
         }
 
         List<String> suggestedSkus = new ArrayList<>();
+        List<PendingOrderLine> pendingOrderLines = new ArrayList<>();
         ArrayNode contents = objectMapper.createArrayNode();
-        contents.add(buildUserContent(userMessage.trim()));
+        contents.add(buildUserContent(buildUserMessageWithContext(userMessage.trim(), conversationContext)));
 
         for (int iteration = 0; iteration < MAX_FUNCTION_CALL_ITERATIONS; iteration++) {
             JsonNode response;
@@ -114,7 +125,7 @@ public class GeminiService {
             List<JsonNode> functionCalls = extractFunctionCalls(modelParts);
             if (functionCalls.isEmpty()) {
                 String text = extractTextResponse(modelParts).orElse("No pude generar una respuesta.");
-                return new GeminiChatResult(text, List.copyOf(suggestedSkus));
+                return new GeminiChatResult(text, List.copyOf(suggestedSkus), List.copyOf(pendingOrderLines));
             }
 
             contents.add(modelContent);
@@ -138,6 +149,7 @@ public class GeminiService {
                 }
 
                 collectSuggestedSkus(functionName, result, suggestedSkus);
+                collectPendingOrderLines(functionName, result, pendingOrderLines);
 
                 ObjectNode functionResponse = objectMapper.createObjectNode();
                 functionResponse.put("name", functionName);
@@ -155,6 +167,24 @@ public class GeminiService {
     }
 
     @SuppressWarnings("unchecked")
+    private void collectPendingOrderLines(
+            String functionName, Map<String, Object> result, List<PendingOrderLine> pendingOrderLines) {
+        if (Boolean.TRUE.equals(result.get("error"))) {
+            return;
+        }
+        if (!"prepararPedido".equals(functionName) || !(result.get("items") instanceof List<?> items)) {
+            return;
+        }
+        pendingOrderLines.clear();
+        for (Object item : items) {
+            if (item instanceof Map<?, ?> map && map.get("sku") != null) {
+                int quantity = map.get("quantity") instanceof Number number ? number.intValue() : 1;
+                pendingOrderLines.add(new PendingOrderLine(map.get("sku").toString(), quantity));
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
     private void collectSuggestedSkus(String functionName, Map<String, Object> result, List<String> suggestedSkus) {
         if (Boolean.TRUE.equals(result.get("error"))) {
             return;
@@ -163,6 +193,13 @@ public class GeminiService {
             suggestedSkus.add(result.get("sku").toString());
         }
         if ("listarCatalogo".equals(functionName) && result.get("items") instanceof List<?> items) {
+            for (Object item : items) {
+                if (item instanceof Map<?, ?> map && map.get("sku") != null) {
+                    suggestedSkus.add(map.get("sku").toString());
+                }
+            }
+        }
+        if ("prepararPedido".equals(functionName) && result.get("items") instanceof List<?> items) {
             for (Object item : items) {
                 if (item instanceof Map<?, ?> map && map.get("sku") != null) {
                     suggestedSkus.add(map.get("sku").toString());
@@ -183,6 +220,8 @@ public class GeminiService {
                         extractStringArg(args, "sku"),
                         extractIntArg(args, "cantidad", 1),
                         customerId);
+                case "prepararPedido" -> prepararPedido(extractOrderItems(args));
+                case "confirmarPedido" -> confirmarPedido(extractOrderItems(args), customerId);
                 default -> toolFailureResult("Función no soportada: " + functionName);
             };
         } catch (ResourceNotFoundException ex) {
@@ -215,7 +254,10 @@ public class GeminiService {
         return switch (functionName) {
             case "consultarStock" -> "No pude verificar el stock en este momento. Intenta de nuevo o usa /catalogo.";
             case "listarCatalogo" -> "No pude consultar el catálogo en este momento. Usa /catalogo para ver los repuestos disponibles.";
-            case "crearOrden" -> "No pude registrar tu pedido en este momento. Intenta con /comprar SKU o más tarde.";
+            case "crearOrden", "confirmarPedido" ->
+                    "No pude registrar tu pedido en este momento. Intenta con /comprar SKU o más tarde.";
+            case "prepararPedido" ->
+                    "No pude preparar tu pedido en este momento. Intenta de nuevo o usa /catalogo.";
             default -> "Ocurrió un problema al procesar tu solicitud. Intenta de nuevo en unos momentos.";
         };
     }
@@ -371,6 +413,93 @@ public class GeminiService {
         return "Consultar compatibilidad";
     }
 
+    private Map<String, Object> prepararPedido(List<PendingOrderLine> items) {
+        if (items == null || items.isEmpty()) {
+            throw new IllegalArgumentException("Debes indicar al menos un repuesto para el pedido.");
+        }
+
+        List<Map<String, Object>> validatedItems = new ArrayList<>();
+        BigDecimal total = BigDecimal.ZERO;
+
+        for (PendingOrderLine line : items) {
+            ProductVariant variant = findActiveVariant(line.sku());
+            Product product = variant.getProduct();
+            BigDecimal unitPrice = resolveUnitPrice(variant, product);
+
+            if (variant.getStock() < line.quantity()) {
+                throw new InsufficientStockException(
+                        "Stock insuficiente para SKU: " + variant.getSku() + ". Disponible: " + variant.getStock());
+            }
+
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("sku", variant.getSku());
+            item.put("productName", product != null ? product.getName() : variant.getSku());
+            item.put("quantity", line.quantity());
+            item.put("unitPrice", unitPrice);
+            item.put("subtotal", unitPrice.multiply(BigDecimal.valueOf(line.quantity())));
+            item.put("application", resolveApplication(variant));
+            validatedItems.add(item);
+            total = total.add(unitPrice.multiply(BigDecimal.valueOf(line.quantity())));
+        }
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("items", validatedItems);
+        result.put("totalAmount", total);
+        result.put("awaitingConfirmation", true);
+        result.put("message", "Pedido preparado con " + validatedItems.size() + " repuesto(s). Esperando confirmación del cliente.");
+        return result;
+    }
+
+    private Map<String, Object> confirmarPedido(List<PendingOrderLine> items, Long customerId) {
+        if (customerId == null) {
+            throw new IllegalArgumentException("Se requiere un cliente identificado para crear la orden.");
+        }
+        if (items == null || items.isEmpty()) {
+            throw new IllegalArgumentException("Debes indicar al menos un repuesto para confirmar el pedido.");
+        }
+
+        List<OrderItemRequestDTO> orderItems = new ArrayList<>();
+        for (PendingOrderLine line : items) {
+            ProductVariant variant = findActiveVariant(line.sku());
+            if (variant.getStock() < line.quantity()) {
+                throw new InsufficientStockException(
+                        "Stock insuficiente para SKU: " + variant.getSku() + ". Disponible: " + variant.getStock());
+            }
+            orderItems.add(OrderItemRequestDTO.builder()
+                    .productVariantId(variant.getId())
+                    .quantity(line.quantity())
+                    .build());
+        }
+
+        OrderDTO order = orderService.createOrder(customerId, orderItems);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("orderId", order.getId());
+        result.put("status", order.getStatus().name());
+        result.put("totalAmount", order.getTotalAmount());
+        result.put("itemCount", orderItems.size());
+        result.put("message", "Orden creada exitosamente con ID " + order.getId());
+        return result;
+    }
+
+    private List<PendingOrderLine> extractOrderItems(JsonNode args) {
+        JsonNode itemsNode = args.path("items");
+        if (!itemsNode.isArray() || itemsNode.isEmpty()) {
+            throw new IllegalArgumentException("Debes indicar al menos un repuesto en 'items'.");
+        }
+
+        List<PendingOrderLine> items = new ArrayList<>();
+        for (JsonNode itemNode : itemsNode) {
+            String sku = extractStringArg(itemNode, "sku");
+            int quantity = extractIntArg(itemNode, "cantidad", 1);
+            if (quantity <= 0) {
+                throw new IllegalArgumentException("La cantidad debe ser un entero positivo.");
+            }
+            items.add(new PendingOrderLine(sku.trim().toUpperCase(), quantity));
+        }
+        return items;
+    }
+
     private Map<String, Object> crearOrden(String rawSku, int cantidad, Long customerId) {
         try {
             if (customerId == null) {
@@ -513,13 +642,68 @@ public class GeminiService {
         crearOrden.put("description", "Crea una orden de compra para un repuesto identificado por SKU.");
         crearOrden.set("parameters", crearOrdenParams);
 
+        ObjectNode orderItemSchema = objectMapper.createObjectNode();
+        orderItemSchema.set("sku", objectMapper.createObjectNode()
+                .put("type", "STRING")
+                .put("description", "Código SKU del repuesto"));
+        orderItemSchema.set("cantidad", objectMapper.createObjectNode()
+                .put("type", "INTEGER")
+                .put("description", "Cantidad de unidades (por defecto 1)"));
+
+        ObjectNode orderItemObject = objectMapper.createObjectNode();
+        orderItemObject.put("type", "OBJECT");
+        orderItemObject.set("properties", orderItemSchema);
+        orderItemObject.set("required", objectMapper.createArrayNode().add("sku"));
+
+        ObjectNode orderItemsArray = objectMapper.createObjectNode();
+        orderItemsArray.put("type", "ARRAY");
+        orderItemsArray.put("description", "Lista de repuestos del pedido");
+        orderItemsArray.set("items", orderItemObject);
+
+        ObjectNode multiOrderProperties = objectMapper.createObjectNode();
+        multiOrderProperties.set("items", orderItemsArray);
+
+        ObjectNode multiOrderParams = objectMapper.createObjectNode();
+        multiOrderParams.put("type", "OBJECT");
+        multiOrderParams.set("properties", multiOrderProperties);
+        multiOrderParams.set("required", objectMapper.createArrayNode().add("items"));
+
+        ObjectNode prepararPedido = objectMapper.createObjectNode();
+        prepararPedido.put("name", "prepararPedido");
+        prepararPedido.put(
+                "description",
+                "Prepara un pedido con uno o más repuestos para confirmación del cliente. No crea la orden aún.");
+        prepararPedido.set("parameters", multiOrderParams);
+
+        ObjectNode confirmarPedido = objectMapper.createObjectNode();
+        confirmarPedido.put("name", "confirmarPedido");
+        confirmarPedido.put(
+                "description",
+                "Confirma y registra un pedido con uno o más repuestos cuando el cliente acepta.");
+        confirmarPedido.set("parameters", multiOrderParams);
+
         ObjectNode functionDeclarations = objectMapper.createObjectNode();
         functionDeclarations.set("functionDeclarations", objectMapper.createArrayNode()
                 .add(consultarStock)
                 .add(listarCatalogo)
-                .add(crearOrden));
+                .add(crearOrden)
+                .add(prepararPedido)
+                .add(confirmarPedido));
 
         return objectMapper.createArrayNode().add(functionDeclarations);
+    }
+
+    private String buildUserMessageWithContext(String userMessage, String conversationContext) {
+        if (conversationContext == null || conversationContext.isBlank()) {
+            return userMessage;
+        }
+        return """
+                [Contexto de la conversación]
+                %s
+
+                [Mensaje del cliente]
+                %s"""
+                .formatted(conversationContext.trim(), userMessage);
     }
 
     private ObjectNode buildUserContent(String userMessage) {

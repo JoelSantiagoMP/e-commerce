@@ -64,6 +64,11 @@ class TelegramBotServiceTest {
     @Mock
     private GeminiService geminiService;
 
+    @Mock
+    private ChatSessionService chatSessionService;
+
+    private PurchaseIntentResolver purchaseIntentResolver;
+
     private SimpleMeterRegistry meterRegistry;
 
     private TelegramBotService telegramBotService;
@@ -71,6 +76,8 @@ class TelegramBotServiceTest {
     @BeforeEach
     void setUp() {
         meterRegistry = new SimpleMeterRegistry();
+        purchaseIntentResolver = new PurchaseIntentResolver();
+        chatSessionService = new ChatSessionService(productVariantRepository, purchaseIntentResolver);
         telegramBotService = new TelegramBotService(
                 productService,
                 orderService,
@@ -78,6 +85,8 @@ class TelegramBotServiceTest {
                 productVariantRepository,
                 telegramClientService,
                 geminiService,
+                chatSessionService,
+                purchaseIntentResolver,
                 meterRegistry
         );
         ReflectionTestUtils.setField(telegramBotService, "botUsername", "Autorepuestosdemo_bot");
@@ -355,7 +364,7 @@ class TelegramBotServiceTest {
 
         Customer customer = buildCustomer(chatId);
         when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
-        when(geminiService.chat("¿Cuánto cuesta FRN-CHE-001?", customer.getId()))
+        when(geminiService.chat("¿Cuánto cuesta FRN-CHE-001?", customer.getId(), ""))
                 .thenReturn(new GeminiChatResult(
                         "El repuesto FRN-CHE-001 cuesta $85.000 COP y hay 15 unidades disponibles.",
                         List.of("FRN-CHE-001")));
@@ -365,7 +374,7 @@ class TelegramBotServiceTest {
         String response = telegramBotService.processUpdate(update);
 
         assertTrue(response.contains("$85.000 COP"));
-        verify(geminiService).chat("¿Cuánto cuesta FRN-CHE-001?", customer.getId());
+        verify(geminiService).chat("¿Cuánto cuesta FRN-CHE-001?", customer.getId(), "");
         verify(telegramClientService).sendMessageWithInlineKeyboard(eq(chatId), eq(response), any());
     }
 
@@ -515,6 +524,88 @@ class TelegramBotServiceTest {
         verify(productService, never()).getAllActiveCategories();
         assertEquals(1.0, meterRegistry.counter(
                 MetricsConfig.TELEGRAM_COMMANDS_METRIC, "command", "unknown").count());
+    }
+
+    @Test
+    void processUpdate_contextualPurchaseConfirmation_showsMultiItemSummaryWithoutGemini() {
+        Long chatId = 777888999L;
+        Customer customer = buildCustomer(chatId);
+
+        ProductVariant pastillas = buildVariant("FRN-TOY-003", 6, new BigDecimal("145000"));
+        ProductVariant amortiguadores = ProductVariant.builder()
+                .id(2L)
+                .product(Product.builder()
+                        .id(2L)
+                        .name("Amortiguadores a Gas Nitrógeno")
+                        .basePrice(new BigDecimal("180000"))
+                        .build())
+                .sku("SUS-CHE-021")
+                .color("Traseros Corsa Evolution")
+                .stock(8)
+                .isActive(true)
+                .build();
+
+        when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
+        when(productVariantRepository.findBySku("FRN-TOY-003")).thenReturn(Optional.of(pastillas));
+        when(productVariantRepository.findBySku("SUS-CHE-021")).thenReturn(Optional.of(amortiguadores));
+        when(telegramClientService.buildMultiOrderConfirmationKeyboard(any()))
+                .thenReturn(Map.of("inline_keyboard", List.of()));
+
+        chatSessionService.recordShownSkus(chatId, List.of("FRN-TOY-003", "SUS-CHE-021"));
+
+        TelegramUpdateDTO update = buildUpdate(
+                chatId, "si ambos que me mostraste, quiero los 2, los comprare", "Joel");
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Resumen de tu Pedido"));
+        assertTrue(response.contains("FRN-TOY-003"));
+        assertTrue(response.contains("SUS-CHE-021"));
+        verify(geminiService, never()).chat(any(), any(), any());
+        verify(telegramClientService).sendMessageWithInlineKeyboard(eq(chatId), eq(response), any());
+    }
+
+    @Test
+    void processUpdate_confirmMultiOrderCallback_createsOrderWithMultipleItems() {
+        Long chatId = 111222333L;
+        Long messageId = 90L;
+
+        Customer customer = buildCustomer(chatId);
+        ProductVariant pastillas = buildVariant("FRN-TOY-003", 6, new BigDecimal("145000"));
+        ProductVariant amortiguadores = ProductVariant.builder()
+                .id(2L)
+                .product(Product.builder()
+                        .id(2L)
+                        .name("Amortiguadores a Gas Nitrógeno")
+                        .basePrice(new BigDecimal("180000"))
+                        .build())
+                .sku("SUS-CHE-021")
+                .stock(8)
+                .isActive(true)
+                .build();
+
+        OrderDTO createdOrder = OrderDTO.builder()
+                .id(150L)
+                .status(OrderStatus.PENDING)
+                .totalAmount(new BigDecimal("325000"))
+                .build();
+
+        TelegramUpdateDTO update = buildCallbackUpdate(
+                chatId, messageId, "callback-multi", "CONFIRM_MULTI_ORDER:FRN-TOY-003:1,SUS-CHE-021:1");
+
+        when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
+        when(productVariantRepository.findBySku("FRN-TOY-003")).thenReturn(Optional.of(pastillas));
+        when(productVariantRepository.findBySku("SUS-CHE-021")).thenReturn(Optional.of(amortiguadores));
+        when(orderService.createOrder(eq(5L), any())).thenReturn(createdOrder);
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Pedido Registrado con Éxito"));
+
+        ArgumentCaptor<List<OrderItemRequestDTO>> itemsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(orderService).createOrder(eq(5L), itemsCaptor.capture());
+        assertEquals(2, itemsCaptor.getValue().size());
+        verify(telegramClientService).editMessageText(eq(chatId), eq(messageId), eq(response));
     }
 
     private Customer buildCustomer(Long chatId) {

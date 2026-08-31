@@ -17,6 +17,7 @@ import com.tienda.repository.CustomerRepository;
 import com.tienda.repository.ProductVariantRepository;
 import com.tienda.service.OrderService;
 import com.tienda.service.ProductService;
+import com.tienda.telegram.dto.PendingOrderLine;
 import com.tienda.telegram.dto.TelegramCallbackQueryDTO;
 import com.tienda.telegram.dto.TelegramChatDTO;
 import com.tienda.telegram.dto.TelegramMessageDTO;
@@ -31,6 +32,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -43,6 +45,7 @@ import org.springframework.stereotype.Service;
 public class TelegramBotService {
 
     private static final String CONFIRM_ORDER_PREFIX = "CONFIRM_ORDER:";
+    private static final String CONFIRM_MULTI_ORDER_PREFIX = "CONFIRM_MULTI_ORDER:";
     private static final String SELECT_QTY_PREFIX = "SELECT_QTY:";
     private static final String BUY_SKU_PREFIX = "BUY_SKU:";
     private static final String SHOW_CATALOG_CALLBACK = "SHOW_CATALOG";
@@ -63,6 +66,8 @@ public class TelegramBotService {
     private final ProductVariantRepository productVariantRepository;
     private final TelegramClientService telegramClientService;
     private final GeminiService geminiService;
+    private final ChatSessionService chatSessionService;
+    private final PurchaseIntentResolver purchaseIntentResolver;
     private final MeterRegistry meterRegistry;
 
     @Value("${telegram.bot.username:Autorepuestosdemo_bot}")
@@ -161,6 +166,12 @@ public class TelegramBotService {
                 return handleSelectQuantity(chatId, messageId, sku, quantity);
             }
 
+            if (data != null && data.startsWith(CONFIRM_MULTI_ORDER_PREFIX)) {
+                String payload = data.substring(CONFIRM_MULTI_ORDER_PREFIX.length()).trim();
+                return handleConfirmMultiOrder(
+                        chatId, messageId, callback.getMessage().getChat(), decodeMultiOrderPayload(payload));
+            }
+
             if (data != null && data.startsWith(CONFIRM_ORDER_PREFIX)) {
                 String payload = data.substring(CONFIRM_ORDER_PREFIX.length()).trim();
                 String[] confirmParts = payload.split(":", 2);
@@ -172,6 +183,7 @@ public class TelegramBotService {
             }
 
             if (CANCEL_ORDER_CALLBACK.equals(data)) {
+                chatSessionService.clearPendingOrder(chatId);
                 String cancelMessage = "❌ *Pedido cancelado.*\n\nPuedes volver a intentarlo con /catalogo.";
                 telegramClientService.editMessageText(chatId, messageId, cancelMessage);
                 return cancelMessage;
@@ -283,6 +295,7 @@ public class TelegramBotService {
                 chatId,
                 catalog.text(),
                 telegramClientService.buildCatalogKeyboard(catalog.skus()));
+        chatSessionService.recordShownProductsFromCatalog(chatId, catalog.skus());
         messageAlreadySent[0] = true;
         log.info("Catálogo enviado con {} SKUs y teclado inline. chatId={}", catalog.skus().size(), chatId);
         return catalog.text();
@@ -473,13 +486,32 @@ public class TelegramBotService {
         Customer customer = resolveOrCreateCustomer(chatId, chat);
         log.info("Consulta en lenguaje natural de chatId={}, customerId={}", chatId, customer.getId());
 
+        String normalized = normalizeForIntent(text);
+
+        Optional<String> contextualResponse = tryHandleContextualPurchase(
+                chatId, chat, text, normalized, messageAlreadySent);
+        if (contextualResponse.isPresent()) {
+            return contextualResponse.get();
+        }
+
         try {
-            GeminiChatResult result = geminiService.chat(text, customer.getId());
+            GeminiChatResult result = geminiService.chat(
+                    text, customer.getId(), chatSessionService.buildGeminiContext(chatId));
             log.info(
-                    "Respuesta Gemini para chatId={}: skusSugeridos={}, longitudMensaje={}",
+                    "Respuesta Gemini para chatId={}: skusSugeridos={}, lineasPendientes={}, longitudMensaje={}",
                     chatId,
                     result.suggestedSkus().size(),
+                    result.pendingOrderLines().size(),
                     result.message().length());
+
+            if (!result.suggestedSkus().isEmpty()) {
+                chatSessionService.recordShownSkus(chatId, result.suggestedSkus());
+            }
+
+            if (!result.pendingOrderLines().isEmpty()) {
+                return presentMultiItemOrderSummary(
+                        chatId, result.pendingOrderLines(), result.message(), messageAlreadySent);
+            }
 
             if (!result.suggestedSkus().isEmpty()) {
                 telegramClientService.sendMessageWithInlineKeyboard(
@@ -495,6 +527,184 @@ public class TelegramBotService {
             return "Disculpa, no pude procesar tu consulta. Intenta de nuevo o usa /catalogo.";
         }
     }
+
+    private Optional<String> tryHandleContextualPurchase(
+            Long chatId,
+            TelegramChatDTO chat,
+            String text,
+            String normalized,
+            boolean[] messageAlreadySent) {
+
+        if (chatSessionService.isAwaitingConfirmation(chatId)) {
+            if (purchaseIntentResolver.isNegative(normalized)) {
+                chatSessionService.clearPendingOrder(chatId);
+                return Optional.of("❌ Pedido cancelado. Si quieres ajustar algo, dime qué repuestos necesitas.");
+            }
+
+            if (purchaseIntentResolver.isAffirmative(normalized)) {
+                return chatSessionService.getPendingOrder(chatId)
+                        .map(lines -> confirmMultiItemOrder(chatId, chat, lines, messageAlreadySent, null));
+            }
+        }
+
+        if (chatSessionService.hasShownProducts(chatId)) {
+            return chatSessionService.tryResolvePurchaseIntent(chatId, normalized)
+                    .map(lines -> presentMultiItemOrderSummary(chatId, lines, buildInferredOrderMessage(lines), messageAlreadySent));
+        }
+
+        return Optional.empty();
+    }
+
+    private String buildInferredOrderMessage(List<PendingOrderLine> lines) {
+        return """
+                ¡Perfecto! Entendí que quieres estos repuestos. \
+                Revisa el resumen y confirma si todo está correcto. \
+                Si algo no es lo que buscabas, dime qué cambiar.""";
+    }
+
+    private String presentMultiItemOrderSummary(
+            Long chatId,
+            List<PendingOrderLine> lines,
+            String introMessage,
+            boolean[] messageAlreadySent) {
+
+        List<ValidatedOrderLine> validatedLines = validateOrderLines(lines);
+        if (validatedLines.isEmpty()) {
+            return "No pude identificar los repuestos de tu pedido. ¿Puedes indicarme cuáles necesitas?";
+        }
+
+        chatSessionService.setPendingOrder(chatId, toPendingOrderLines(validatedLines));
+
+        String summaryMessage = buildMultiOrderSummaryMessage(introMessage, validatedLines);
+        Map<String, Object> keyboard =
+                telegramClientService.buildMultiOrderConfirmationKeyboard(toPendingOrderLines(validatedLines));
+
+        telegramClientService.sendMessageWithInlineKeyboard(chatId, summaryMessage, keyboard);
+        messageAlreadySent[0] = true;
+
+        log.info("Resumen multi-producto enviado. chatId={}, items={}", chatId, validatedLines.size());
+        return summaryMessage;
+    }
+
+    private String confirmMultiItemOrder(
+            Long chatId,
+            TelegramChatDTO chat,
+            List<PendingOrderLine> lines,
+            boolean[] messageAlreadySent,
+            Long messageIdToEdit) {
+
+        Customer customer = resolveOrCreateCustomer(chatId, chat);
+        List<ValidatedOrderLine> validatedLines = validateOrderLines(lines);
+
+        if (validatedLines.isEmpty()) {
+            throw new IllegalArgumentException("No hay repuestos válidos para confirmar el pedido.");
+        }
+
+        List<OrderItemRequestDTO> orderItems = validatedLines.stream()
+                .map(line -> OrderItemRequestDTO.builder()
+                        .productVariantId(line.variant().getId())
+                        .quantity(line.quantity())
+                        .build())
+                .toList();
+
+        OrderDTO order = orderService.createOrder(customer.getId(), orderItems);
+        chatSessionService.clearPendingOrder(chatId);
+
+        log.info("Orden multi-producto confirmada. orderId={}, chatId={}, items={}",
+                order.getId(), chatId, orderItems.size());
+
+        String successMessage = buildOrderSuccessMessage(order);
+        if (messageIdToEdit != null) {
+            telegramClientService.editMessageText(chatId, messageIdToEdit, successMessage);
+        } else {
+            telegramClientService.sendMessage(chatId, successMessage);
+            messageAlreadySent[0] = true;
+        }
+        return successMessage;
+    }
+
+    private String handleConfirmMultiOrder(
+            Long chatId, Long messageId, TelegramChatDTO chat, List<PendingOrderLine> lines) {
+        boolean[] messageAlreadySent = {false};
+        return confirmMultiItemOrder(chatId, chat, lines, messageAlreadySent, messageId);
+    }
+
+    private List<ValidatedOrderLine> validateOrderLines(List<PendingOrderLine> lines) {
+        List<ValidatedOrderLine> validated = new ArrayList<>();
+        for (PendingOrderLine line : lines) {
+            ProductVariant variant = productVariantRepository.findBySku(line.sku())
+                    .filter(v -> Boolean.TRUE.equals(v.getIsActive()))
+                    .orElse(null);
+            if (variant == null) {
+                continue;
+            }
+            if (line.quantity() > variant.getStock()) {
+                throw new InsufficientStockException(
+                        "Stock insuficiente para SKU: " + line.sku() + ". Disponible: " + variant.getStock());
+            }
+            validated.add(new ValidatedOrderLine(variant, line.quantity()));
+        }
+        return validated;
+    }
+
+    private String buildMultiOrderSummaryMessage(String introMessage, List<ValidatedOrderLine> lines) {
+        StringBuilder summary = new StringBuilder();
+        if (introMessage != null && !introMessage.isBlank()) {
+            summary.append(introMessage.trim()).append("\n\n");
+        }
+
+        summary.append("🛒 *Resumen de tu Pedido*\n\n");
+        BigDecimal total = BigDecimal.ZERO;
+
+        for (ValidatedOrderLine line : lines) {
+            ProductVariant variant = line.variant();
+            Product product = variant.getProduct();
+            String productName = product != null ? product.getName() : variant.getSku();
+            BigDecimal unitPrice = resolveVariantPrice(variant, product);
+            BigDecimal subtotal = unitPrice.multiply(BigDecimal.valueOf(line.quantity()));
+            total = total.add(subtotal);
+
+            summary.append("🚗 *").append(productName).append("*\n");
+            summary.append("• SKU: `").append(variant.getSku()).append("`\n");
+            summary.append("• Cantidad: ").append(line.quantity()).append("\n");
+            summary.append("• Subtotal: ").append(formatCop(subtotal)).append("\n\n");
+        }
+
+        summary.append("• *Total:* ").append(formatCop(total)).append("\n\n");
+        summary.append("¿Confirmas este pedido? Si algo no es correcto, dime qué ajustar.");
+        return summary.toString().trim();
+    }
+
+    private List<PendingOrderLine> toPendingOrderLines(List<ValidatedOrderLine> lines) {
+        return lines.stream()
+                .map(line -> new PendingOrderLine(line.variant().getSku(), line.quantity()))
+                .toList();
+    }
+
+    private String encodeMultiOrderPayload(List<PendingOrderLine> lines) {
+        return lines.stream()
+                .map(line -> line.sku() + ":" + line.quantity())
+                .reduce((left, right) -> left + "," + right)
+                .orElse("");
+    }
+
+    private List<PendingOrderLine> decodeMultiOrderPayload(String payload) {
+        if (payload == null || payload.isBlank()) {
+            throw new IllegalArgumentException("Pedido inválido.");
+        }
+
+        List<PendingOrderLine> lines = new ArrayList<>();
+        for (String entry : payload.split(",")) {
+            String[] parts = entry.split(":", 2);
+            if (parts.length < 2) {
+                throw new IllegalArgumentException("Pedido inválido.");
+            }
+            lines.add(new PendingOrderLine(parts[0].trim().toUpperCase(), parsePositiveQuantity(parts[1])));
+        }
+        return lines;
+    }
+
+    private record ValidatedOrderLine(ProductVariant variant, int quantity) {}
 
     private String startPurchaseFromSku(
             Long chatId, Long messageId, TelegramChatDTO chat, String sku, boolean editExistingMessage) {

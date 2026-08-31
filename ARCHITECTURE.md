@@ -52,9 +52,14 @@ Entidades clave:
 - [ ] Manejador Global de Excepciones (`@ControllerAdvice`).
 
 ### Phase 3: Telegram Bot Webhook Integration
-- [ ] Endpoint seguro `/api/v1/telegram/webhook` con verificación de secret token.
-- [ ] Service de Telegram para parseo de comandos (`/start`, `/catalogo`, `/carrito`, `/checkout`).
-- [ ] Integración del flujo de creación de orden desde Telegram hacia el Service de Órdenes.
+- [x] Endpoint seguro `/api/v1/telegram/webhook` con verificación de secret token.
+- [x] Service de Telegram para parseo de comandos (`/start`, `/help`, `/catalogo`, `/comprar`).
+- [x] Integración del flujo de creación de orden desde Telegram hacia el Service de Órdenes.
+- [x] Integración con Google Gemini (`gemini-2.5-flash`) y function calling (`listarCatalogo`, `consultarStock`, `crearOrden`, `prepararPedido`, `confirmarPedido`).
+- [x] Sesión conversacional por chat (`ChatSessionService`) para recordar productos mostrados.
+- [x] Detección local de intención de compra (`PurchaseIntentResolver`) sin exigir SKU al cliente.
+- [x] Flujo de confirmación multi-producto con teclado inline (✅ Confirmar / ❌ Cancelar).
+- [x] Deduplicación de updates de Telegram.
 
 ### Phase 4: Frontend Admin Dashboard (React + Vite)
 - [ ] Configuración inicial de React + Vite + Tailwind CSS.

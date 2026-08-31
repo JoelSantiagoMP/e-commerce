@@ -1,5 +1,6 @@
 package com.tienda.telegram.service;
 
+import com.tienda.telegram.dto.PendingOrderLine;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -178,6 +179,28 @@ public class TelegramClientService {
         ));
 
         return Map.of("inline_keyboard", rows);
+    }
+
+    public Map<String, Object> buildMultiOrderConfirmationKeyboard(List<PendingOrderLine> lines) {
+        String payload = lines.stream()
+                .map(line -> line.sku() + ":" + line.quantity())
+                .reduce((left, right) -> left + "," + right)
+                .orElse("");
+
+        return Map.of(
+                "inline_keyboard", List.of(
+                        List.of(
+                                Map.of(
+                                        "text", "✅ Confirmar Pedido",
+                                        "callback_data", "CONFIRM_MULTI_ORDER:" + payload
+                                ),
+                                Map.of(
+                                        "text", "❌ Cancelar",
+                                        "callback_data", "CANCEL_ORDER"
+                                )
+                        )
+                )
+        );
     }
 
     private Map<String, String> buildBuySkuButton(String sku) {

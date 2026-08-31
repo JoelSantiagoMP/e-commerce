@@ -15,6 +15,7 @@
 
 - [Descripción general](#descripción-general)
 - [Arquitectura del sistema](#arquitectura-del-sistema)
+- [Bot de Telegram — flujo conversacional](#bot-de-telegram--flujo-conversacional)
 - [Stack tecnológico](#stack-tecnológico)
 - [Modelo de datos](#modelo-de-datos)
 - [Variables de entorno](#variables-de-entorno)
@@ -83,6 +84,109 @@ Controller  →  Service  →  Repository  →  MySQL
 - **Services:** lógica de negocio, control transaccional de stock y órdenes.
 - **Repositories:** acceso a datos con Spring Data JPA.
 - **GlobalExceptionHandler:** respuestas de error uniformes (`ErrorResponseDTO`).
+
+---
+
+## Bot de Telegram — flujo conversacional
+
+El bot actúa como **asesor comercial virtual** para repuestos automotrices. Combina comandos estructurados, detección local de intención y **Google Gemini** con *function calling* para consultar stock, listar catálogo y registrar pedidos.
+
+### Capacidades
+
+| Canal | Qué puede hacer el cliente |
+|-------|---------------------------|
+| Comandos | `/start`, `/help`, `/catalogo`, `/comprar SKU [CANTIDAD]` |
+| Lenguaje natural | Buscar repuestos por vehículo, consultar precios/stock, confirmar compras sin escribir SKUs |
+| Botones inline | 🛒 Comprar, selector de cantidad, confirmar/cancelar pedido |
+
+### Memoria de sesión (`ChatSessionService`)
+
+Cada chat de Telegram mantiene contexto en memoria (~45 min):
+
+- **Productos mostrados:** SKUs vistos recientemente (catálogo o respuestas de Gemini).
+- **Pedido pendiente:** ítems inferidos esperando confirmación del cliente.
+
+Esto permite que frases como *"sí, ambos que me mostraste"* o *"los compro"* se resuelvan **sin pedir códigos SKU**.
+
+### Flujo de compra en lenguaje natural
+
+```mermaid
+sequenceDiagram
+    participant C as Cliente
+    participant B as Bot
+    participant S as ChatSession
+    participant G as Gemini
+    participant API as OrderService
+
+    C->>B: Pastillas Fortuner + amortiguadores Corsa traseros
+    B->>G: Consulta con function calling
+    G-->>B: listarCatalogo / consultarStock
+    B->>S: Guarda FRN-TOY-003, SUS-CHE-021
+    B-->>C: Muestra productos + botones 🛒
+
+    C->>B: Sí ambos, los quiero
+    B->>S: Resuelve intención local (PurchaseIntentResolver)
+    B-->>C: Resumen multi-producto + ✅ Confirmar / ❌ Cancelar
+
+    C->>B: Sí / toca Confirmar
+    B->>API: createOrder (múltiples ítems)
+    B-->>C: ✅ Pedido registrado + instrucciones de pago
+```
+
+### Detección de intención (`PurchaseIntentResolver`)
+
+Antes de llamar a Gemini, el bot interpreta mensajes comunes:
+
+| Intención | Ejemplos | Acción |
+|-----------|----------|--------|
+| Compra contextual | *"ambos"*, *"los 2"*, *"los que me mostraste"*, *"los compro"* | Arma pedido con productos mostrados (1 ud. c/u por defecto) |
+| Confirmación | *"sí"*, *"dale"*, *"confirmo"* | Registra el pedido pendiente |
+| Cancelación | *"no"*, *"cancelar"* | Limpia el pedido pendiente |
+| Catálogo | *"catálogo"*, *"qué vendes"* | Muestra inventario sin Gemini |
+| Saludo | *"hola"*, *"buenas"* | Menú de bienvenida |
+
+> **Nota:** *"los 2"* con dos productos mostrados significa **ambos productos**, no cantidad 2.
+
+### Herramientas Gemini (function calling)
+
+| Función | Descripción |
+|---------|-------------|
+| `listarCatalogo()` | Catálogo con stock disponible |
+| `consultarStock(sku)` | Precio, stock y compatibilidad por SKU |
+| `prepararPedido(items[])` | Valida un pedido multi-ítem y lo deja listo para confirmar |
+| `confirmarPedido(items[])` | Crea la orden cuando el cliente acepta |
+| `crearOrden(sku, cantidad)` | Orden de un solo ítem (flujo legacy) |
+
+Gemini recibe **contexto de sesión** (productos mostrados y pedido pendiente) para no volver a pedir SKUs cuando el cliente ya vio las opciones.
+
+### Ejemplo de conversación
+
+```
+Cliente: véndeme pastillas para la Fortuner y amortiguadores traseros del Corsa, 1 juego cada uno
+Bot:     [muestra FRN-TOY-003 y SUS-CHE-021 con precios y stock]
+
+Cliente: sí ambos que me mostraste, quiero los 2, los compraré
+Bot:     🛒 Resumen de tu Pedido
+         • Pastillas de Freno Cerámicas — FRN-TOY-003 x1 — $145.000
+         • Amortiguadores a Gas — SUS-CHE-021 x1 — $180.000
+         Total: $325.000
+         [✅ Confirmar Pedido] [❌ Cancelar]
+
+Cliente: sí
+Bot:     ✅ ¡Pedido Registrado con Éxito! Orden #150 — Total: $325.000
+```
+
+Si el cliente necesita ajustar algo (*"solo las pastillas"*, *"cambia a 2 juegos"*), el bot continúa la conversación con el contexto cargado.
+
+### Componentes clave
+
+| Archivo | Responsabilidad |
+|---------|-----------------|
+| `TelegramBotService` | Orquesta comandos, callbacks, flujo contextual y Gemini |
+| `ChatSessionService` | Sesión por `chatId`: productos mostrados y pedido pendiente |
+| `PurchaseIntentResolver` | Detecta confirmaciones y referencias a productos previos |
+| `GeminiService` | Prompt, function calling y contexto conversacional |
+| `TelegramClientService` | Envío de mensajes y teclados inline (incl. multi-pedido) |
 
 ---
 
@@ -545,10 +649,12 @@ e-commerce/
 │   ├── dto/                    # Data Transfer Objects
 │   ├── entity/                 # Entidades JPA
 │   ├── exception/              # Excepciones y @ControllerAdvice
-│   ├── gemini/                 # Integración Google Gemini
+│   ├── gemini/                 # Integración Google Gemini (chat + function calling)
 │   ├── repository/             # Spring Data JPA
 │   ├── service/                # Lógica de negocio
-│   └── telegram/               # Bot, webhook, deduplicación
+│   └── telegram/               # Bot, webhook, sesión de chat, deduplicación
+│       ├── dto/                # PendingOrderLine, ShownProduct, DTOs Telegram
+│       └── service/            # BotService, ChatSession, PurchaseIntentResolver
 ├── src/main/resources/
 │   └── application.yml         # Configuración Spring Boot
 ├── Dockerfile                  # Build multi-stage para Render
