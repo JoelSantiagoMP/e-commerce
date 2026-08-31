@@ -38,6 +38,7 @@ import org.springframework.stereotype.Service;
 public class TelegramBotService {
 
     private static final String CONFIRM_ORDER_PREFIX = "CONFIRM_ORDER:";
+    private static final String SELECT_QTY_PREFIX = "SELECT_QTY:";
     private static final String CANCEL_ORDER_CALLBACK = "CANCEL_ORDER";
 
     private final ProductService productService;
@@ -100,6 +101,9 @@ public class TelegramBotService {
         } catch (ResourceNotFoundException | InsufficientStockException ex) {
             log.warn("Error de negocio en Telegram chatId={}: {}", chatId, ex.getMessage());
             response = "⚠️ " + ex.getMessage();
+        } catch (IllegalArgumentException ex) {
+            log.warn("Argumento inválido en Telegram chatId={}: {}", chatId, ex.getMessage());
+            response = ex.getMessage();
         }
 
         if (messageAlreadySent[0]) {
@@ -122,9 +126,22 @@ public class TelegramBotService {
         telegramClientService.answerCallbackQuery(callback.getId());
 
         try {
+            if (data != null && data.startsWith(SELECT_QTY_PREFIX)) {
+                String payload = data.substring(SELECT_QTY_PREFIX.length()).trim();
+                String[] selectParts = payload.split(":", 2);
+                String sku = selectParts[0].trim().toUpperCase();
+                int quantity = parsePositiveQuantity(selectParts[1]);
+                return handleSelectQuantity(chatId, messageId, sku, quantity);
+            }
+
             if (data != null && data.startsWith(CONFIRM_ORDER_PREFIX)) {
-                String sku = data.substring(CONFIRM_ORDER_PREFIX.length()).trim().toUpperCase();
-                return handleConfirmOrder(chatId, messageId, callback.getMessage().getChat(), sku);
+                String payload = data.substring(CONFIRM_ORDER_PREFIX.length()).trim();
+                String[] confirmParts = payload.split(":", 2);
+                String sku = confirmParts[0].trim().toUpperCase();
+                int quantity = confirmParts.length > 1
+                        ? parsePositiveQuantity(confirmParts[1])
+                        : 1;
+                return handleConfirmOrder(chatId, messageId, callback.getMessage().getChat(), sku, quantity);
             }
 
             if (CANCEL_ORDER_CALLBACK.equals(data)) {
@@ -135,15 +152,44 @@ public class TelegramBotService {
 
             log.warn("Callback data no reconocido: {}", data);
             return "Callback no reconocido.";
-        } catch (ResourceNotFoundException | InsufficientStockException ex) {
+        } catch (ResourceNotFoundException | InsufficientStockException | IllegalArgumentException ex) {
             log.warn("Error de negocio en callback chatId={}: {}", chatId, ex.getMessage());
-            String errorMessage = "⚠️ " + ex.getMessage();
+            String errorMessage = ex instanceof IllegalArgumentException
+                    ? ex.getMessage()
+                    : "⚠️ " + ex.getMessage();
             telegramClientService.editMessageText(chatId, messageId, errorMessage);
             return errorMessage;
         }
     }
 
-    private String handleConfirmOrder(Long chatId, Long messageId, TelegramChatDTO chat, String sku) {
+    private String handleSelectQuantity(Long chatId, Long messageId, String sku, int quantity) {
+        ProductVariant variant = productVariantRepository.findBySku(sku)
+                .filter(v -> Boolean.TRUE.equals(v.getIsActive()))
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "Repuesto no encontrado o inactivo con SKU: " + sku));
+
+        if (quantity > variant.getStock()) {
+            String insufficientStockMessage = buildInsufficientStockMessage(sku, quantity, variant.getStock());
+            telegramClientService.editMessageText(chatId, messageId, insufficientStockMessage);
+            return insufficientStockMessage;
+        }
+
+        Product product = variant.getProduct();
+        String productName = product != null ? product.getName() : sku;
+        BigDecimal unitPrice = resolveVariantPrice(variant, product);
+        BigDecimal total = unitPrice.multiply(BigDecimal.valueOf(quantity));
+
+        String summaryMessage = buildOrderSummaryMessage(productName, sku, quantity, unitPrice, total);
+        Map<String, Object> keyboard = telegramClientService.buildOrderConfirmationKeyboard(sku, quantity);
+
+        telegramClientService.editMessageTextWithInlineKeyboard(chatId, messageId, summaryMessage, keyboard);
+
+        log.info("Cantidad seleccionada vía callback Telegram. sku={}, quantity={}, chatId={}", sku, quantity, chatId);
+        return summaryMessage;
+    }
+
+    private String handleConfirmOrder(
+            Long chatId, Long messageId, TelegramChatDTO chat, String sku, int quantity) {
         Customer customer = resolveOrCreateCustomer(chatId, chat);
 
         ProductVariant variant = productVariantRepository.findBySku(sku)
@@ -151,19 +197,20 @@ public class TelegramBotService {
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "Repuesto no encontrado o inactivo con SKU: " + sku));
 
-        if (variant.getStock() < 1) {
-            throw new InsufficientStockException("Sin stock disponible para SKU: " + sku);
+        if (variant.getStock() < quantity) {
+            throw new InsufficientStockException(
+                    "Stock insuficiente para SKU: " + sku + ". Disponible: " + variant.getStock());
         }
 
         OrderDTO order = orderService.createOrder(
                 customer.getId(),
                 List.of(OrderItemRequestDTO.builder()
                         .productVariantId(variant.getId())
-                        .quantity(1)
+                        .quantity(quantity)
                         .build()));
 
-        log.info("Orden confirmada vía callback Telegram: orderId={}, sku={}, chatId={}",
-                order.getId(), sku, chatId);
+        log.info("Orden confirmada vía callback Telegram: orderId={}, sku={}, quantity={}, chatId={}",
+                order.getId(), sku, quantity, chatId);
 
         String successMessage = buildOrderSuccessMessage(order);
         telegramClientService.editMessageText(chatId, messageId, successMessage);
@@ -191,7 +238,7 @@ public class TelegramBotService {
                 📋 *Menú de Autorepuestos*
                 
                 /catalogo — Ver pastillas, filtros, amortiguadores y más
-                /comprar SKU — Simular pedido (ej: /comprar FRN-CHE-001)
+                /comprar SKU [CANTIDAD] — Simular pedido (ej: /comprar FRN-CHE-001 o /comprar FRN-CHE-001 3)
                 /start — Ver este menú
                 
                 Repuestos disponibles: frenos, lubricantes y suspensión.""";
@@ -236,7 +283,7 @@ public class TelegramBotService {
             }
         }
 
-        catalog.append("Para pedir: /comprar SKU (ej: /comprar FRN-CHE-001)");
+        catalog.append("Para pedir: /comprar SKU (selector) o /comprar SKU [CANTIDAD]");
 
         log.info("Catálogo generado con {} categorías activas", categories.size());
         return catalog.toString().trim();
@@ -263,26 +310,99 @@ public class TelegramBotService {
 
         Product product = variant.getProduct();
         String productName = product != null ? product.getName() : sku;
-        BigDecimal price = resolveVariantPrice(variant, product);
 
-        String summaryMessage = buildOrderSummaryMessage(productName, sku, price);
-        Map<String, Object> keyboard = telegramClientService.buildOrderConfirmationKeyboard(sku);
+        if (!hasQuantitySpecified(parts)) {
+            String selectionMessage = buildQuantitySelectionMessage(productName, sku, variant.getStock());
+            Map<String, Object> keyboard = telegramClientService.buildQuantitySelectorKeyboard(sku);
+
+            telegramClientService.sendMessageWithInlineKeyboard(chatId, selectionMessage, keyboard);
+            messageAlreadySent[0] = true;
+
+            log.info("Selector de cantidad enviado. sku={}, chatId={}", sku, chatId);
+            return selectionMessage;
+        }
+
+        int quantity = parsePositiveQuantity(parts[2]);
+        return presentOrderSummary(chatId, sku, variant, productName, quantity, messageAlreadySent);
+    }
+
+    private boolean hasQuantitySpecified(String[] parts) {
+        return parts.length >= 3 && !parts[2].isBlank();
+    }
+
+    private String presentOrderSummary(
+            Long chatId,
+            String sku,
+            ProductVariant variant,
+            String productName,
+            int quantity,
+            boolean[] messageAlreadySent) {
+
+        if (quantity > variant.getStock()) {
+            return buildInsufficientStockMessage(sku, quantity, variant.getStock());
+        }
+
+        Product product = variant.getProduct();
+        BigDecimal unitPrice = resolveVariantPrice(variant, product);
+        BigDecimal total = unitPrice.multiply(BigDecimal.valueOf(quantity));
+
+        String summaryMessage = buildOrderSummaryMessage(productName, sku, quantity, unitPrice, total);
+        Map<String, Object> keyboard = telegramClientService.buildOrderConfirmationKeyboard(sku, quantity);
 
         telegramClientService.sendMessageWithInlineKeyboard(chatId, summaryMessage, keyboard);
         messageAlreadySent[0] = true;
 
-        log.info("Resumen de pedido enviado con confirmación interactiva. sku={}, chatId={}", sku, chatId);
+        log.info("Resumen de pedido enviado con confirmación interactiva. sku={}, quantity={}, chatId={}",
+                sku, quantity, chatId);
         return summaryMessage;
     }
 
-    private String buildOrderSummaryMessage(String productName, String sku, BigDecimal price) {
+    private String buildQuantitySelectionMessage(String productName, String sku, int availableStock) {
+        return """
+                🛒 *Selecciona la cantidad*
+                • *Producto:* %s
+                • *SKU:* %s
+                • *Stock disponible:* %d
+                
+                Elige una opción rápida o usa /comprar %s [CANTIDAD]"""
+                .formatted(productName, sku, availableStock, sku);
+    }
+
+    private int parsePositiveQuantity(String rawQuantity) {
+        try {
+            int quantity = Integer.parseInt(rawQuantity.trim());
+            if (quantity <= 0) {
+                throw new IllegalArgumentException(
+                        "La cantidad debe ser un entero positivo.\nEjemplo: /comprar FRN-CHE-001 3");
+            }
+            return quantity;
+        } catch (NumberFormatException ex) {
+            throw new IllegalArgumentException(
+                    "Cantidad inválida. Usa un número entero positivo.\nEjemplo: /comprar FRN-CHE-001 3");
+        }
+    }
+
+    private String buildOrderSummaryMessage(
+            String productName, String sku, int quantity, BigDecimal unitPrice, BigDecimal total) {
         return """
                 🛒 *Resumen de tu Pedido*
                 • *Producto:* %s
                 • *SKU:* %s
-                • *Precio:* %s
+                • *Cantidad:* %d
+                • *Precio unitario:* %s
+                • *Total:* %s
                 
-                ¿Deseas confirmar este pedido?""".formatted(productName, sku, formatCop(price));
+                ¿Deseas confirmar este pedido?"""
+                .formatted(productName, sku, quantity, formatCop(unitPrice), formatCop(total));
+    }
+
+    private String buildInsufficientStockMessage(String sku, int requestedQuantity, int availableStock) {
+        return """
+                ⚠️ *Stock insuficiente*
+                Solicitaste *%d* unidades de *%s*, pero solo hay *%d* disponibles.
+                
+                Puedes intentar: /comprar %s %d"""
+                .formatted(requestedQuantity, sku, availableStock, sku, availableStock);
     }
 
     private String buildOrderSuccessMessage(OrderDTO order) {

@@ -91,13 +91,45 @@ public class TelegramClientService {
         }
     }
 
-    public Map<String, Object> buildOrderConfirmationKeyboard(String sku) {
+    public void editMessageTextWithInlineKeyboard(
+            Long chatId, Long messageId, String text, Map<String, Object> inlineKeyboard) {
+        String url = apiUrl + botToken + "/editMessageText";
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("chat_id", chatId);
+        payload.put("message_id", messageId);
+        payload.put("text", text);
+        payload.put("parse_mode", "Markdown");
+        payload.put("reply_markup", inlineKeyboard);
+
+        try {
+            postToTelegram(url, payload, "editMessageText", chatId);
+        } catch (Exception ex) {
+            log.error("No se pudo editar mensaje con teclado inline en Telegram chatId={}, messageId={}",
+                    chatId, messageId, ex);
+        }
+    }
+
+    public Map<String, Object> buildQuantitySelectorKeyboard(String sku) {
+        return Map.of(
+                "inline_keyboard", List.of(
+                        List.of(
+                                Map.of("text", "1", "callback_data", "SELECT_QTY:" + sku + ":1"),
+                                Map.of("text", "2", "callback_data", "SELECT_QTY:" + sku + ":2"),
+                                Map.of("text", "4", "callback_data", "SELECT_QTY:" + sku + ":4"),
+                                Map.of("text", "8", "callback_data", "SELECT_QTY:" + sku + ":8")
+                        )
+                )
+        );
+    }
+
+    public Map<String, Object> buildOrderConfirmationKeyboard(String sku, int quantity) {
         return Map.of(
                 "inline_keyboard", List.of(
                         List.of(
                                 Map.of(
                                         "text", "✅ Confirmar Pedido",
-                                        "callback_data", "CONFIRM_ORDER:" + sku
+                                        "callback_data", "CONFIRM_ORDER:" + sku + ":" + quantity
                                 ),
                                 Map.of(
                                         "text", "❌ Cancelar",

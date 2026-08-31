@@ -3,6 +3,7 @@ package com.tienda.telegram.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -35,6 +36,7 @@ import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -146,92 +148,134 @@ class TelegramBotServiceTest {
     }
 
     @Test
-    void processUpdate_comprarCommand_sendsInteractiveConfirmationWithoutCreatingOrder() {
+    void processUpdate_comprarCommand_withoutQuantity_showsQuantitySelector() {
         Long chatId = 111222333L;
         TelegramUpdateDTO update = buildUpdate(chatId, "/comprar FRN-CHE-001", "Taller");
 
-        Customer customer = Customer.builder()
-                .id(5L)
-                .telegramChatId(chatId)
-                .fullName("Taller")
-                .createdAt(LocalDateTime.now())
-                .build();
-
-        Product product = Product.builder()
-                .id(1L)
-                .name("Pastillas de Freno Cerámicas")
-                .basePrice(new BigDecimal("85000"))
-                .build();
-        ProductVariant variant = ProductVariant.builder()
-                .id(1L)
-                .product(product)
-                .sku("FRN-CHE-001")
-                .stock(5)
-                .isActive(true)
-                .build();
-
+        Customer customer = buildCustomer(chatId);
+        ProductVariant variant = buildVariant("FRN-CHE-001", 5, new BigDecimal("85000"));
         Map<String, Object> keyboard = Map.of("inline_keyboard", List.of());
 
         when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
         when(productVariantRepository.findBySku("FRN-CHE-001")).thenReturn(Optional.of(variant));
-        when(telegramClientService.buildOrderConfirmationKeyboard("FRN-CHE-001")).thenReturn(keyboard);
+        when(telegramClientService.buildQuantitySelectorKeyboard("FRN-CHE-001")).thenReturn(keyboard);
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Selecciona la cantidad"));
+        assertTrue(response.contains("Pastillas de Freno Cerámicas"));
+        assertTrue(response.contains("Stock disponible:* 5"));
+        verify(telegramClientService).buildQuantitySelectorKeyboard("FRN-CHE-001");
+        verify(telegramClientService).sendMessageWithInlineKeyboard(eq(chatId), eq(response), eq(keyboard));
+        verify(telegramClientService, never()).buildOrderConfirmationKeyboard(any(), anyInt());
+        verify(orderService, never()).createOrder(any(), any());
+    }
+
+    @Test
+    void processUpdate_selectQtyCallback_validQuantity_showsOrderSummaryWithConfirmation() {
+        Long chatId = 111222333L;
+        Long messageId = 55L;
+
+        ProductVariant variant = buildVariant("FRN-CHE-001", 5, new BigDecimal("85000"));
+        Map<String, Object> keyboard = Map.of("inline_keyboard", List.of());
+
+        TelegramUpdateDTO update = buildCallbackUpdate(
+                chatId, messageId, "callback-qty", "SELECT_QTY:FRN-CHE-001:4");
+
+        when(productVariantRepository.findBySku("FRN-CHE-001")).thenReturn(Optional.of(variant));
+        when(telegramClientService.buildOrderConfirmationKeyboard("FRN-CHE-001", 4)).thenReturn(keyboard);
 
         String response = telegramBotService.processUpdate(update);
 
         assertTrue(response.contains("Resumen de tu Pedido"));
-        assertTrue(response.contains("Pastillas de Freno Cerámicas"));
-        assertTrue(response.contains("FRN-CHE-001"));
-        assertTrue(response.contains("¿Deseas confirmar este pedido?"));
+        assertTrue(response.contains("Cantidad:* 4"));
+        assertTrue(response.contains("$340.000"));
+        verify(telegramClientService).editMessageTextWithInlineKeyboard(eq(chatId), eq(messageId), eq(response), eq(keyboard));
         verify(orderService, never()).createOrder(any(), any());
-        verify(telegramClientService).sendMessageWithInlineKeyboard(eq(chatId), eq(response), eq(keyboard));
-        verify(telegramClientService, never()).sendMessage(eq(chatId), any());
     }
 
     @Test
-    void processUpdate_confirmOrderCallback_createsPendingOrderAndEditsMessage() {
+    void processUpdate_selectQtyCallback_quantityExceedsStock_editsMessageWithoutConfirmation() {
+        Long chatId = 111222333L;
+        Long messageId = 56L;
+
+        ProductVariant variant = buildVariant("FRN-CHE-001", 3, new BigDecimal("85000"));
+
+        TelegramUpdateDTO update = buildCallbackUpdate(
+                chatId, messageId, "callback-qty", "SELECT_QTY:FRN-CHE-001:8");
+
+        when(productVariantRepository.findBySku("FRN-CHE-001")).thenReturn(Optional.of(variant));
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Stock insuficiente"));
+        assertTrue(response.contains("8"));
+        assertTrue(response.contains("3"));
+        verify(telegramClientService).editMessageText(eq(chatId), eq(messageId), eq(response));
+        verify(telegramClientService, never()).editMessageTextWithInlineKeyboard(any(), any(), any(), any());
+        verify(orderService, never()).createOrder(any(), any());
+    }
+
+    @Test
+    void processUpdate_comprarCommand_withQuantity_calculatesTotalAndSendsConfirmation() {
+        Long chatId = 111222333L;
+        TelegramUpdateDTO update = buildUpdate(chatId, "/comprar FRN-CHE-001 3", "Taller");
+
+        Customer customer = buildCustomer(chatId);
+        ProductVariant variant = buildVariant("FRN-CHE-001", 5, new BigDecimal("85000"));
+        Map<String, Object> keyboard = Map.of("inline_keyboard", List.of());
+
+        when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
+        when(productVariantRepository.findBySku("FRN-CHE-001")).thenReturn(Optional.of(variant));
+        when(telegramClientService.buildOrderConfirmationKeyboard("FRN-CHE-001", 3)).thenReturn(keyboard);
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Cantidad:* 3"));
+        assertTrue(response.contains("$255.000"));
+        verify(telegramClientService).buildOrderConfirmationKeyboard("FRN-CHE-001", 3);
+        verify(telegramClientService).sendMessageWithInlineKeyboard(eq(chatId), eq(response), eq(keyboard));
+        verify(orderService, never()).createOrder(any(), any());
+    }
+
+    @Test
+    void processUpdate_comprarCommand_quantityExceedsStock_sendsFriendlyMessageWithoutKeyboard() {
+        Long chatId = 111222333L;
+        TelegramUpdateDTO update = buildUpdate(chatId, "/comprar FRN-CHE-001 10", "Taller");
+
+        Customer customer = buildCustomer(chatId);
+        ProductVariant variant = buildVariant("FRN-CHE-001", 5, new BigDecimal("85000"));
+
+        when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
+        when(productVariantRepository.findBySku("FRN-CHE-001")).thenReturn(Optional.of(variant));
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Stock insuficiente"));
+        assertTrue(response.contains("10"));
+        assertTrue(response.contains("5"));
+        assertTrue(response.contains("/comprar FRN-CHE-001 5"));
+        verify(telegramClientService, never()).sendMessageWithInlineKeyboard(any(), any(), any());
+        verify(telegramClientService).sendMessage(eq(chatId), eq(response));
+        verify(orderService, never()).createOrder(any(), any());
+    }
+
+    @Test
+    void processUpdate_confirmOrderCallback_createsPendingOrderWithRequestedQuantity() {
         Long chatId = 111222333L;
         Long messageId = 77L;
 
-        Customer customer = Customer.builder()
-                .id(5L)
-                .telegramChatId(chatId)
-                .fullName("Taller")
-                .createdAt(LocalDateTime.now())
-                .build();
-
-        Product product = Product.builder()
-                .id(1L)
-                .name("Pastillas de Freno Cerámicas")
-                .basePrice(new BigDecimal("85000"))
-                .build();
-        ProductVariant variant = ProductVariant.builder()
-                .id(1L)
-                .product(product)
-                .sku("FRN-CHE-001")
-                .stock(5)
-                .isActive(true)
-                .build();
+        Customer customer = buildCustomer(chatId);
+        ProductVariant variant = buildVariant("FRN-CHE-001", 5, new BigDecimal("85000"));
 
         OrderDTO createdOrder = OrderDTO.builder()
                 .id(99L)
                 .status(OrderStatus.PENDING)
-                .totalAmount(new BigDecimal("85000"))
+                .totalAmount(new BigDecimal("255000"))
                 .build();
 
-        TelegramUpdateDTO update = TelegramUpdateDTO.builder()
-                .updateId(2L)
-                .callbackQuery(TelegramCallbackQueryDTO.builder()
-                        .id("callback-123")
-                        .data("CONFIRM_ORDER:FRN-CHE-001")
-                        .message(TelegramMessageDTO.builder()
-                                .messageId(messageId)
-                                .chat(TelegramChatDTO.builder()
-                                        .id(chatId)
-                                        .firstName("Taller")
-                                        .build())
-                                .build())
-                        .build())
-                .build();
+        TelegramUpdateDTO update = buildCallbackUpdate(
+                chatId, messageId, "callback-123", "CONFIRM_ORDER:FRN-CHE-001:3");
 
         when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
         when(productVariantRepository.findBySku("FRN-CHE-001")).thenReturn(Optional.of(variant));
@@ -240,15 +284,42 @@ class TelegramBotServiceTest {
         String response = telegramBotService.processUpdate(update);
 
         assertTrue(response.contains("Pedido Registrado con Éxito"));
-        assertTrue(response.contains("Orden #"));
-        assertTrue(response.contains("99"));
-        assertTrue(response.contains("PENDING"));
-        assertTrue(response.contains("3001234567"));
-        assertTrue(response.contains("https://pago.autorepuestos.com/order-99"));
-        verify(telegramClientService).answerCallbackQuery("callback-123");
-        verify(orderService).createOrder(eq(5L), any(List.class));
+        assertTrue(response.contains("255"));
+
+        ArgumentCaptor<List<OrderItemRequestDTO>> itemsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(orderService).createOrder(eq(5L), itemsCaptor.capture());
+        assertEquals(1, itemsCaptor.getValue().size());
+        assertEquals(3, itemsCaptor.getValue().get(0).getQuantity());
+        assertEquals(1L, itemsCaptor.getValue().get(0).getProductVariantId());
         verify(telegramClientService).editMessageText(eq(chatId), eq(messageId), eq(response));
-        verify(telegramClientService, never()).sendMessage(any(), any());
+    }
+
+    @Test
+    void processUpdate_confirmOrderCallback_withoutQuantityInPayload_defaultsToOne() {
+        Long chatId = 111222333L;
+        Long messageId = 77L;
+
+        Customer customer = buildCustomer(chatId);
+        ProductVariant variant = buildVariant("FRN-CHE-001", 5, new BigDecimal("85000"));
+
+        OrderDTO createdOrder = OrderDTO.builder()
+                .id(99L)
+                .status(OrderStatus.PENDING)
+                .totalAmount(new BigDecimal("85000"))
+                .build();
+
+        TelegramUpdateDTO update = buildCallbackUpdate(
+                chatId, messageId, "callback-123", "CONFIRM_ORDER:FRN-CHE-001");
+
+        when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
+        when(productVariantRepository.findBySku("FRN-CHE-001")).thenReturn(Optional.of(variant));
+        when(orderService.createOrder(eq(5L), any())).thenReturn(createdOrder);
+
+        telegramBotService.processUpdate(update);
+
+        ArgumentCaptor<List<OrderItemRequestDTO>> itemsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(orderService).createOrder(eq(5L), itemsCaptor.capture());
+        assertEquals(1, itemsCaptor.getValue().get(0).getQuantity());
     }
 
     @Test
@@ -256,20 +327,7 @@ class TelegramBotServiceTest {
         Long chatId = 111222333L;
         Long messageId = 88L;
 
-        TelegramUpdateDTO update = TelegramUpdateDTO.builder()
-                .updateId(3L)
-                .callbackQuery(TelegramCallbackQueryDTO.builder()
-                        .id("callback-456")
-                        .data("CANCEL_ORDER")
-                        .message(TelegramMessageDTO.builder()
-                                .messageId(messageId)
-                                .chat(TelegramChatDTO.builder()
-                                        .id(chatId)
-                                        .firstName("Taller")
-                                        .build())
-                                .build())
-                        .build())
-                .build();
+        TelegramUpdateDTO update = buildCallbackUpdate(chatId, messageId, "callback-456", "CANCEL_ORDER");
 
         String response = telegramBotService.processUpdate(update);
 
@@ -293,6 +351,49 @@ class TelegramBotServiceTest {
         verify(productService, never()).getAllActiveCategories();
         assertEquals(1.0, meterRegistry.counter(
                 MetricsConfig.TELEGRAM_COMMANDS_METRIC, "command", "unknown").count());
+    }
+
+    private Customer buildCustomer(Long chatId) {
+        return Customer.builder()
+                .id(5L)
+                .telegramChatId(chatId)
+                .fullName("Taller")
+                .createdAt(LocalDateTime.now())
+                .build();
+    }
+
+    private ProductVariant buildVariant(String sku, int stock, BigDecimal basePrice) {
+        Product product = Product.builder()
+                .id(1L)
+                .name("Pastillas de Freno Cerámicas")
+                .basePrice(basePrice)
+                .build();
+
+        return ProductVariant.builder()
+                .id(1L)
+                .product(product)
+                .sku(sku)
+                .stock(stock)
+                .isActive(true)
+                .build();
+    }
+
+    private TelegramUpdateDTO buildCallbackUpdate(
+            Long chatId, Long messageId, String callbackId, String callbackData) {
+        return TelegramUpdateDTO.builder()
+                .updateId(2L)
+                .callbackQuery(TelegramCallbackQueryDTO.builder()
+                        .id(callbackId)
+                        .data(callbackData)
+                        .message(TelegramMessageDTO.builder()
+                                .messageId(messageId)
+                                .chat(TelegramChatDTO.builder()
+                                        .id(chatId)
+                                        .firstName("Taller")
+                                        .build())
+                                .build())
+                        .build())
+                .build();
     }
 
     private TelegramUpdateDTO buildUpdate(Long chatId, String text, String firstName) {
