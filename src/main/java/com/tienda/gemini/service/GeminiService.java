@@ -62,9 +62,9 @@ public class GeminiService {
 
             Reglas de negocio:
             - Para consultar disponibilidad o precios, invoca SIEMPRE consultarStock(sku).
-            - Para mostrar el catálogo, invoca SIEMPRE listarCatalogo().
+            - Para mostrar el catálogo o buscar repuestos por vehículo/nombre sin SKU, invoca SIEMPRE listarCatalogo().
             - NUNCA inventes precios, stock, SKUs ni compatibilidades no provistos por las herramientas.
-            - Si el cliente confirma compra con SKU y cantidad, invoca crearOrden(sku, cantidad).
+            - Si el cliente confirma compra con SKU y cantidad, invoca crearOrden(sku, cantidad). Si no indica cantidad, usa 1.
             - Si una herramienta devuelve error=true, comunica el mensaje al cliente sin inventar datos.
             - Si un producto tiene stock 0, indícalo como no disponible y no lo ofrezcas en el catálogo.
             """;
@@ -122,13 +122,26 @@ public class GeminiService {
             ArrayNode functionResponseParts = objectMapper.createArrayNode();
             for (JsonNode functionCall : functionCalls) {
                 String functionName = functionCall.path("name").asText();
-                JsonNode args = functionCall.path("args");
-                Map<String, Object> result = executeFunction(functionName, args, customerId);
+                JsonNode args = functionCall.has("args") ? functionCall.path("args") : objectMapper.createObjectNode();
+
+                Map<String, Object> result;
+                try {
+                    log.info("Ejecutando function call: {} args={}", functionName, args);
+                    result = executeFunction(functionName, args, customerId);
+                } catch (Exception ex) {
+                    log.error(
+                            "Error inesperado al ejecutar function call {} con args={}",
+                            functionName,
+                            args,
+                            ex);
+                    result = toolFailureResult(resolveToolFailureMessage(functionName, ex));
+                }
+
                 collectSuggestedSkus(functionName, result, suggestedSkus);
 
                 ObjectNode functionResponse = objectMapper.createObjectNode();
                 functionResponse.put("name", functionName);
-                functionResponse.set("response", objectMapper.valueToTree(result));
+                functionResponse.set("response", objectMapper.valueToTree(sanitizeFunctionResult(result)));
                 functionResponseParts.add(objectMapper.createObjectNode().set("functionResponse", functionResponse));
             }
 
@@ -164,77 +177,178 @@ public class GeminiService {
     Map<String, Object> executeFunction(String functionName, JsonNode args, Long customerId) {
         try {
             return switch (functionName) {
-                case "consultarStock" -> consultarStock(args.path("sku").asText());
+                case "consultarStock" -> consultarStock(extractStringArg(args, "sku"));
                 case "listarCatalogo" -> listarCatalogo();
                 case "crearOrden" -> crearOrden(
-                        args.path("sku").asText(),
-                        args.path("cantidad").asInt(1),
+                        extractStringArg(args, "sku"),
+                        extractIntArg(args, "cantidad", 1),
                         customerId);
-                default -> Map.of(
-                        "error", true,
-                        "message", "Función no soportada: " + functionName);
+                default -> toolFailureResult("Función no soportada: " + functionName);
             };
         } catch (ResourceNotFoundException ex) {
-            return Map.of("error", true, "message", ex.getMessage());
+            log.warn("Function call {}: recurso no encontrado - {}", functionName, ex.getMessage());
+            return toolFailureResult(ex.getMessage());
         } catch (InsufficientStockException ex) {
-            return Map.of("error", true, "insufficientStock", true, "message", ex.getMessage());
+            log.warn("Function call {}: stock insuficiente - {}", functionName, ex.getMessage());
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("error", true);
+            result.put("insufficientStock", true);
+            result.put("message", ex.getMessage());
+            return result;
         } catch (IllegalArgumentException ex) {
-            return Map.of("error", true, "message", ex.getMessage());
+            log.warn("Function call {}: argumento inválido - {}", functionName, ex.getMessage());
+            return toolFailureResult(ex.getMessage());
+        } catch (Exception ex) {
+            log.error("Function call {} falló con args={}", functionName, args, ex);
+            return toolFailureResult(resolveToolFailureMessage(functionName, ex));
         }
+    }
+
+    private Map<String, Object> toolFailureResult(String message) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("error", true);
+        result.put("message", message);
+        return result;
+    }
+
+    private String resolveToolFailureMessage(String functionName, Exception ex) {
+        return switch (functionName) {
+            case "consultarStock" -> "No pude verificar el stock en este momento. Intenta de nuevo o usa /catalogo.";
+            case "listarCatalogo" -> "No pude consultar el catálogo en este momento. Usa /catalogo para ver los repuestos disponibles.";
+            case "crearOrden" -> "No pude registrar tu pedido en este momento. Intenta con /comprar SKU o más tarde.";
+            default -> "Ocurrió un problema al procesar tu solicitud. Intenta de nuevo en unos momentos.";
+        };
+    }
+
+    private String extractStringArg(JsonNode args, String fieldName) {
+        JsonNode value = args.path(fieldName);
+        if (value.isMissingNode() || value.isNull()) {
+            throw new IllegalArgumentException("El parámetro '" + fieldName + "' es obligatorio.");
+        }
+        String text = value.asText().trim();
+        if (text.isBlank()) {
+            throw new IllegalArgumentException("El parámetro '" + fieldName + "' no puede estar vacío.");
+        }
+        return text;
+    }
+
+    private int extractIntArg(JsonNode args, String fieldName, int defaultValue) {
+        JsonNode value = args.path(fieldName);
+        if (value.isMissingNode() || value.isNull()) {
+            return defaultValue;
+        }
+        if (value.isNumber()) {
+            return value.intValue();
+        }
+        if (value.isTextual()) {
+            try {
+                return Integer.parseInt(value.asText().trim());
+            } catch (NumberFormatException ex) {
+                throw new IllegalArgumentException(
+                        "El parámetro '" + fieldName + "' debe ser un entero positivo.");
+            }
+        }
+        throw new IllegalArgumentException("El parámetro '" + fieldName + "' debe ser un entero positivo.");
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> sanitizeFunctionResult(Map<String, Object> result) {
+        Map<String, Object> sanitized = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : result.entrySet()) {
+            sanitized.put(entry.getKey(), sanitizeFunctionValue(entry.getValue()));
+        }
+        return sanitized;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object sanitizeFunctionValue(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof BigDecimal decimal) {
+            return decimal.doubleValue();
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> sanitized = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                sanitized.put(String.valueOf(entry.getKey()), sanitizeFunctionValue(entry.getValue()));
+            }
+            return sanitized;
+        }
+        if (value instanceof List<?> list) {
+            List<Object> sanitized = new ArrayList<>();
+            for (Object item : list) {
+                sanitized.add(sanitizeFunctionValue(item));
+            }
+            return sanitized;
+        }
+        return value;
     }
 
     private Map<String, Object> listarCatalogo() {
-        List<Map<String, Object>> items = new ArrayList<>();
+        try {
+            List<Map<String, Object>> items = new ArrayList<>();
 
-        for (CategoryDTO category : productService.getAllActiveCategories()) {
-            for (ProductDTO product : productService.getActiveProductsByCategory(category.getId())) {
-                for (ProductVariantDTO variant : productService.getActiveVariantsByProductId(product.getId())) {
-                    if (variant.getStock() == null || variant.getStock() <= 0) {
-                        continue;
+            for (CategoryDTO category : productService.getAllActiveCategories()) {
+                for (ProductDTO product : productService.getActiveProductsByCategory(category.getId())) {
+                    for (ProductVariantDTO variant : productService.getActiveVariantsByProductId(product.getId())) {
+                        if (variant.getStock() == null || variant.getStock() <= 0) {
+                            continue;
+                        }
+
+                        BigDecimal price = variant.getPriceOverride() != null
+                                ? variant.getPriceOverride()
+                                : product.getBasePrice();
+
+                        Map<String, Object> item = new LinkedHashMap<>();
+                        item.put("category", category.getName());
+                        item.put("productName", product.getName());
+                        item.put("sku", variant.getSku());
+                        item.put("stock", variant.getStock());
+                        item.put("price", price);
+                        item.put("application", resolveApplication(variant));
+                        item.put("position", variant.getSize());
+                        item.put("compatibility", variant.getColor());
+                        items.add(item);
                     }
-
-                    BigDecimal price = variant.getPriceOverride() != null
-                            ? variant.getPriceOverride()
-                            : product.getBasePrice();
-
-                    Map<String, Object> item = new LinkedHashMap<>();
-                    item.put("category", category.getName());
-                    item.put("productName", product.getName());
-                    item.put("sku", variant.getSku());
-                    item.put("stock", variant.getStock());
-                    item.put("price", price);
-                    item.put("application", resolveApplication(variant));
-                    item.put("position", variant.getSize());
-                    item.put("compatibility", variant.getColor());
-                    items.add(item);
                 }
             }
-        }
 
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("items", items);
-        result.put("totalAvailable", items.size());
-        if (items.isEmpty()) {
-            result.put("message", "No hay repuestos con stock disponible en este momento.");
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("items", items);
+            result.put("totalAvailable", items.size());
+            if (items.isEmpty()) {
+                result.put("message", "No hay repuestos con stock disponible en este momento.");
+            }
+            return result;
+        } catch (Exception ex) {
+            log.error("Error al listar catálogo para function call listarCatalogo", ex);
+            throw new IllegalStateException("No pude consultar el catálogo en este momento.", ex);
         }
-        return result;
     }
 
     private Map<String, Object> consultarStock(String rawSku) {
-        ProductVariant variant = findActiveVariant(rawSku);
-        Product product = variant.getProduct();
-        BigDecimal price = resolveUnitPrice(variant, product);
+        try {
+            ProductVariant variant = findActiveVariant(rawSku);
+            Product product = variant.getProduct();
+            BigDecimal price = resolveUnitPrice(variant, product);
 
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("sku", variant.getSku());
-        result.put("productName", product != null ? product.getName() : variant.getSku());
-        result.put("stock", variant.getStock());
-        result.put("price", price);
-        result.put("available", variant.getStock() > 0);
-        result.put("application", resolveApplication(variant));
-        result.put("position", variant.getSize());
-        result.put("compatibility", variant.getColor());
-        return result;
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("sku", variant.getSku());
+            result.put("productName", product != null ? product.getName() : variant.getSku());
+            result.put("stock", variant.getStock());
+            result.put("price", price);
+            result.put("available", variant.getStock() > 0);
+            result.put("application", resolveApplication(variant));
+            result.put("position", variant.getSize());
+            result.put("compatibility", variant.getColor());
+            return result;
+        } catch (ResourceNotFoundException | IllegalArgumentException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            log.error("Error al consultar stock para SKU={}", rawSku, ex);
+            throw new IllegalStateException("No pude verificar el stock en este momento.", ex);
+        }
     }
 
     private String resolveApplication(ProductVariantDTO variant) {
@@ -258,35 +372,42 @@ public class GeminiService {
     }
 
     private Map<String, Object> crearOrden(String rawSku, int cantidad, Long customerId) {
-        if (customerId == null) {
-            throw new IllegalArgumentException("Se requiere un cliente identificado para crear la orden.");
+        try {
+            if (customerId == null) {
+                throw new IllegalArgumentException("Se requiere un cliente identificado para crear la orden.");
+            }
+            if (cantidad <= 0) {
+                throw new IllegalArgumentException("La cantidad debe ser un entero positivo.");
+            }
+
+            ProductVariant variant = findActiveVariant(rawSku);
+
+            if (variant.getStock() < cantidad) {
+                throw new InsufficientStockException(
+                        "Stock insuficiente para SKU: " + variant.getSku() + ". Disponible: " + variant.getStock());
+            }
+
+            OrderDTO order = orderService.createOrder(
+                    customerId,
+                    List.of(OrderItemRequestDTO.builder()
+                            .productVariantId(variant.getId())
+                            .quantity(cantidad)
+                            .build()));
+
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("orderId", order.getId());
+            result.put("status", order.getStatus().name());
+            result.put("totalAmount", order.getTotalAmount());
+            result.put("sku", variant.getSku());
+            result.put("quantity", cantidad);
+            result.put("message", "Orden creada exitosamente con ID " + order.getId());
+            return result;
+        } catch (ResourceNotFoundException | InsufficientStockException | IllegalArgumentException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            log.error("Error al crear orden para SKU={}, cantidad={}, customerId={}", rawSku, cantidad, customerId, ex);
+            throw new IllegalStateException("No pude registrar tu pedido en este momento.", ex);
         }
-        if (cantidad <= 0) {
-            throw new IllegalArgumentException("La cantidad debe ser un entero positivo.");
-        }
-
-        ProductVariant variant = findActiveVariant(rawSku);
-
-        if (variant.getStock() < cantidad) {
-            throw new InsufficientStockException(
-                    "Stock insuficiente para SKU: " + variant.getSku() + ". Disponible: " + variant.getStock());
-        }
-
-        OrderDTO order = orderService.createOrder(
-                customerId,
-                List.of(OrderItemRequestDTO.builder()
-                        .productVariantId(variant.getId())
-                        .quantity(cantidad)
-                        .build()));
-
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put("orderId", order.getId());
-        result.put("status", order.getStatus().name());
-        result.put("totalAmount", order.getTotalAmount());
-        result.put("sku", variant.getSku());
-        result.put("quantity", cantidad);
-        result.put("message", "Orden creada exitosamente con ID " + order.getId());
-        return result;
     }
 
     private ProductVariant findActiveVariant(String rawSku) {
@@ -330,11 +451,24 @@ public class GeminiService {
                     .retrieve()
                     .body(JsonNode.class);
         } catch (RestClientResponseException ex) {
-            log.error("Error en llamada a Gemini API: status={}, body={}", ex.getStatusCode(), ex.getResponseBodyAsString());
+            log.error(
+                    "Error en llamada a Gemini API: status={}, body={}",
+                    ex.getStatusCode(),
+                    ex.getResponseBodyAsString(),
+                    ex);
             if (ex.getStatusCode().value() == HttpStatus.TOO_MANY_REQUESTS.value()) {
                 throw new GeminiRateLimitException("Cuota de Gemini agotada (429)", ex);
             }
+            if (ex.getStatusCode().value() == HttpStatus.NOT_FOUND.value()) {
+                throw new IllegalStateException(
+                        "Modelo Gemini no disponible: " + geminiProperties.getModel()
+                                + ". Verifica GEMINI_MODEL en la configuración.",
+                        ex);
+            }
             throw new IllegalStateException("Error al comunicarse con Gemini: " + ex.getStatusText(), ex);
+        } catch (Exception ex) {
+            log.error("Error inesperado al invocar Gemini API con modelo {}", geminiProperties.getModel(), ex);
+            throw new IllegalStateException("Error al comunicarse con Gemini.", ex);
         }
     }
 
@@ -367,12 +501,12 @@ public class GeminiService {
                 .put("description", "Código SKU del repuesto"));
         crearOrdenProperties.set("cantidad", objectMapper.createObjectNode()
                 .put("type", "INTEGER")
-                .put("description", "Cantidad de unidades a pedir"));
+                .put("description", "Cantidad de unidades a pedir (por defecto 1 si no se indica)"));
 
         ObjectNode crearOrdenParams = objectMapper.createObjectNode();
         crearOrdenParams.put("type", "OBJECT");
         crearOrdenParams.set("properties", crearOrdenProperties);
-        crearOrdenParams.set("required", objectMapper.createArrayNode().add("sku").add("cantidad"));
+        crearOrdenParams.set("required", objectMapper.createArrayNode().add("sku"));
 
         ObjectNode crearOrden = objectMapper.createObjectNode();
         crearOrden.put("name", "crearOrden");

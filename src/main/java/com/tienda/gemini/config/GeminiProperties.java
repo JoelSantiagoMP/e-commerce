@@ -10,6 +10,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class GeminiProperties {
 
     private String key;
-    private String model = "gemini-2.0-flash";
+    private String model = "gemini-2.5-flash";
     private String url = "https://generativelanguage.googleapis.com/v1beta/models";
 }

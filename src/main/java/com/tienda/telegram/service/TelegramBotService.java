@@ -475,6 +475,11 @@ public class TelegramBotService {
 
         try {
             GeminiChatResult result = geminiService.chat(text, customer.getId());
+            log.info(
+                    "Respuesta Gemini para chatId={}: skusSugeridos={}, longitudMensaje={}",
+                    chatId,
+                    result.suggestedSkus().size(),
+                    result.message().length());
 
             if (!result.suggestedSkus().isEmpty()) {
                 telegramClientService.sendMessageWithInlineKeyboard(

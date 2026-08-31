@@ -58,7 +58,7 @@ class GeminiServiceTest {
     void setUp() {
         geminiProperties = new GeminiProperties();
         geminiProperties.setKey("test-key");
-        geminiProperties.setModel("gemini-2.0-flash");
+        geminiProperties.setModel("gemini-2.5-flash");
         geminiProperties.setUrl("https://generativelanguage.googleapis.com/v1beta/models");
 
         objectMapper = new ObjectMapper();
@@ -205,6 +205,55 @@ class GeminiServiceTest {
         assertEquals(1, items.size());
         assertEquals("FRN-CHE-001", items.get(0).get("sku"));
         assertEquals(1, result.get("totalAvailable"));
+    }
+
+    @Test
+    void executeFunction_crearOrden_usesDefaultQuantityWhenMissing() {
+        ProductVariant variant = ProductVariant.builder()
+                .id(10L)
+                .sku("FRN-CHE-001")
+                .stock(5)
+                .isActive(true)
+                .product(Product.builder().name("Pastillas").basePrice(new BigDecimal("85000")).build())
+                .build();
+
+        OrderDTO createdOrder = OrderDTO.builder()
+                .id(101L)
+                .status(OrderStatus.PENDING)
+                .totalAmount(new BigDecimal("85000"))
+                .build();
+
+        when(productVariantRepository.findBySku("FRN-CHE-001")).thenReturn(Optional.of(variant));
+        when(orderService.createOrder(eq(7L), any())).thenReturn(createdOrder);
+
+        ObjectNode args = objectMapper.createObjectNode().put("sku", "FRN-CHE-001");
+        Map<String, Object> result = geminiService.executeFunction("crearOrden", args, 7L);
+
+        ArgumentCaptor<List<OrderItemRequestDTO>> itemsCaptor = ArgumentCaptor.forClass(List.class);
+        verify(orderService).createOrder(eq(7L), itemsCaptor.capture());
+        assertEquals(1, itemsCaptor.getValue().get(0).getQuantity());
+        assertEquals(101L, result.get("orderId"));
+    }
+
+    @Test
+    void executeFunction_consultarStock_returnsFriendlyErrorWhenRepositoryFails() {
+        when(productVariantRepository.findBySku("FRN-CHE-001"))
+                .thenThrow(new RuntimeException("DB connection failed"));
+
+        ObjectNode args = objectMapper.createObjectNode().put("sku", "FRN-CHE-001");
+        Map<String, Object> result = geminiService.executeFunction("consultarStock", args, 1L);
+
+        assertEquals(true, result.get("error"));
+        assertTrue(result.get("message").toString().contains("No pude verificar el stock"));
+    }
+
+    @Test
+    void executeFunction_consultarStock_returnsErrorWhenSkuMissing() {
+        ObjectNode args = objectMapper.createObjectNode();
+        Map<String, Object> result = geminiService.executeFunction("consultarStock", args, 1L);
+
+        assertEquals(true, result.get("error"));
+        assertTrue(result.get("message").toString().contains("sku"));
     }
 
     @Test
