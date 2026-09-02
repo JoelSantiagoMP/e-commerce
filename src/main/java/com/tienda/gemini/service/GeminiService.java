@@ -21,9 +21,11 @@ import com.tienda.repository.ProductVariantRepository;
 import com.tienda.service.OrderService;
 import com.tienda.service.ProductService;
 import java.math.BigDecimal;
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -38,7 +40,7 @@ import org.springframework.web.client.RestClientResponseException;
 @RequiredArgsConstructor
 public class GeminiService {
 
-    private static final int MAX_FUNCTION_CALL_ITERATIONS = 5;
+    private static final int MAX_FUNCTION_CALL_ITERATIONS = 10;
 
     private static final String SYSTEM_INSTRUCTION = """
             Eres el Asesor Comercial Virtual de Autorepuestos Demo.
@@ -61,11 +63,16 @@ public class GeminiService {
             - SIEMPRE incluye el campo Aplicación/compatibilidad vehicular cuando la herramienta lo provea.
             - Al finalizar un catálogo o recomendación, invita al cliente a confirmar en lenguaje natural \
               (por ejemplo "los quiero", "dame ambos") o a tocar el botón 🛒. No exijas que escriba el SKU.
+            - SIEMPRE responde con un mensaje de texto al cliente; nunca dejes la respuesta vacía.
 
             Reglas de negocio:
-            - Para consultar disponibilidad o precios, invoca SIEMPRE consultarStock(sku).
-            - Para mostrar el catálogo o buscar repuestos por vehículo/nombre sin SKU, invoca SIEMPRE listarCatalogo().
+            - Para consultar disponibilidad o precios con SKU conocido, invoca consultarStock(sku).
+            - Para buscar repuestos por nombre, vehículo o descripción sin SKU, invoca buscarRepuestos(consulta).
+            - Para mostrar todo el catálogo, invoca listarCatalogo().
             - NUNCA inventes precios, stock, SKUs ni compatibilidades no provistos por las herramientas.
+            - Si el cliente pide VARIOS repuestos en un mismo mensaje (por ejemplo "pastillas Fortuner, amortiguadores \
+              Corsa y kit Logan"), identifica cada uno con buscarRepuestos y luego invoca prepararPedido UNA sola vez \
+              con TODOS los ítems en el arreglo items. No llames prepararPedido por separado para cada producto.
             - Si el cliente confirma compra con SKU y cantidad explícitos, invoca crearOrden(sku, cantidad). Si no indica cantidad, usa 1.
             - Si el cliente confirma productos ya mostrados (por ejemplo "ambos", "los 2", "los que me mostraste", "sí los quiero"),
               NUNCA pidas el SKU. Resume el pedido e invoca prepararPedido con los SKUs inferidos y cantidad 1 por defecto
@@ -175,13 +182,27 @@ public class GeminiService {
         if (!"prepararPedido".equals(functionName) || !(result.get("items") instanceof List<?> items)) {
             return;
         }
-        pendingOrderLines.clear();
         for (Object item : items) {
             if (item instanceof Map<?, ?> map && map.get("sku") != null) {
                 int quantity = map.get("quantity") instanceof Number number ? number.intValue() : 1;
-                pendingOrderLines.add(new PendingOrderLine(map.get("sku").toString(), quantity));
+                mergePendingOrderLine(pendingOrderLines, map.get("sku").toString(), quantity);
             }
         }
+    }
+
+    void mergePendingOrderLine(List<PendingOrderLine> pendingOrderLines, String sku, int quantity) {
+        String normalizedSku = sku.trim().toUpperCase(Locale.ROOT);
+        int safeQuantity = quantity <= 0 ? 1 : quantity;
+
+        for (int index = 0; index < pendingOrderLines.size(); index++) {
+            PendingOrderLine existing = pendingOrderLines.get(index);
+            if (existing.sku().equals(normalizedSku)) {
+                pendingOrderLines.set(
+                        index, new PendingOrderLine(normalizedSku, existing.quantity() + safeQuantity));
+                return;
+            }
+        }
+        pendingOrderLines.add(new PendingOrderLine(normalizedSku, safeQuantity));
     }
 
     @SuppressWarnings("unchecked")
@@ -192,7 +213,8 @@ public class GeminiService {
         if ("consultarStock".equals(functionName) && result.get("sku") != null) {
             suggestedSkus.add(result.get("sku").toString());
         }
-        if ("listarCatalogo".equals(functionName) && result.get("items") instanceof List<?> items) {
+        if (("listarCatalogo".equals(functionName) || "buscarRepuestos".equals(functionName))
+                && result.get("items") instanceof List<?> items) {
             for (Object item : items) {
                 if (item instanceof Map<?, ?> map && map.get("sku") != null) {
                     suggestedSkus.add(map.get("sku").toString());
@@ -216,6 +238,7 @@ public class GeminiService {
             return switch (functionName) {
                 case "consultarStock" -> consultarStock(extractStringArg(args, "sku"));
                 case "listarCatalogo" -> listarCatalogo();
+                case "buscarRepuestos" -> buscarRepuestos(extractStringArg(args, "consulta"));
                 case "crearOrden" -> crearOrden(
                         extractStringArg(args, "sku"),
                         extractIntArg(args, "cantidad", 1),
@@ -254,6 +277,8 @@ public class GeminiService {
         return switch (functionName) {
             case "consultarStock" -> "No pude verificar el stock en este momento. Intenta de nuevo o usa /catalogo.";
             case "listarCatalogo" -> "No pude consultar el catálogo en este momento. Usa /catalogo para ver los repuestos disponibles.";
+            case "buscarRepuestos" ->
+                    "No pude buscar repuestos en este momento. Intenta de nuevo o usa /catalogo.";
             case "crearOrden", "confirmarPedido" ->
                     "No pude registrar tu pedido en este momento. Intenta con /comprar SKU o más tarde.";
             case "prepararPedido" ->
@@ -344,44 +369,115 @@ public class GeminiService {
 
     private Map<String, Object> listarCatalogo() {
         try {
-            List<Map<String, Object>> items = new ArrayList<>();
-
-            for (CategoryDTO category : productService.getAllActiveCategories()) {
-                for (ProductDTO product : productService.getActiveProductsByCategory(category.getId())) {
-                    for (ProductVariantDTO variant : productService.getActiveVariantsByProductId(product.getId())) {
-                        if (variant.getStock() == null || variant.getStock() <= 0) {
-                            continue;
-                        }
-
-                        BigDecimal price = variant.getPriceOverride() != null
-                                ? variant.getPriceOverride()
-                                : product.getBasePrice();
-
-                        Map<String, Object> item = new LinkedHashMap<>();
-                        item.put("category", category.getName());
-                        item.put("productName", product.getName());
-                        item.put("sku", variant.getSku());
-                        item.put("stock", variant.getStock());
-                        item.put("price", price);
-                        item.put("application", resolveApplication(variant));
-                        item.put("position", variant.getSize());
-                        item.put("compatibility", variant.getColor());
-                        items.add(item);
-                    }
-                }
-            }
-
-            Map<String, Object> result = new LinkedHashMap<>();
-            result.put("items", items);
-            result.put("totalAvailable", items.size());
-            if (items.isEmpty()) {
-                result.put("message", "No hay repuestos con stock disponible en este momento.");
-            }
-            return result;
+            List<Map<String, Object>> items = collectAvailableCatalogItems();
+            return buildCatalogResult(items, "No hay repuestos con stock disponible en este momento.");
         } catch (Exception ex) {
             log.error("Error al listar catálogo para function call listarCatalogo", ex);
             throw new IllegalStateException("No pude consultar el catálogo en este momento.", ex);
         }
+    }
+
+    private Map<String, Object> buscarRepuestos(String rawQuery) {
+        try {
+            List<String> searchTerms = tokenizeSearchQuery(rawQuery);
+            if (searchTerms.isEmpty()) {
+                throw new IllegalArgumentException("La consulta de búsqueda no puede estar vacía.");
+            }
+
+            List<Map<String, Object>> matches = collectAvailableCatalogItems().stream()
+                    .filter(item -> matchesSearchTerms(item, searchTerms))
+                    .toList();
+
+            Map<String, Object> result = buildCatalogResult(
+                    matches,
+                    "No encontré repuestos que coincidan con: " + rawQuery.trim());
+            result.put("query", rawQuery.trim());
+            return result;
+        } catch (IllegalArgumentException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            log.error("Error al buscar repuestos para consulta={}", rawQuery, ex);
+            throw new IllegalStateException("No pude buscar repuestos en este momento.", ex);
+        }
+    }
+
+    private List<Map<String, Object>> collectAvailableCatalogItems() {
+        List<Map<String, Object>> items = new ArrayList<>();
+
+        for (CategoryDTO category : productService.getAllActiveCategories()) {
+            for (ProductDTO product : productService.getActiveProductsByCategory(category.getId())) {
+                for (ProductVariantDTO variant : productService.getActiveVariantsByProductId(product.getId())) {
+                    if (variant.getStock() == null || variant.getStock() <= 0) {
+                        continue;
+                    }
+
+                    BigDecimal price = variant.getPriceOverride() != null
+                            ? variant.getPriceOverride()
+                            : product.getBasePrice();
+
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("category", category.getName());
+                    item.put("productName", product.getName());
+                    item.put("sku", variant.getSku());
+                    item.put("stock", variant.getStock());
+                    item.put("price", price);
+                    item.put("application", resolveApplication(variant));
+                    item.put("position", variant.getSize());
+                    item.put("compatibility", variant.getColor());
+                    items.add(item);
+                }
+            }
+        }
+
+        return items;
+    }
+
+    private Map<String, Object> buildCatalogResult(List<Map<String, Object>> items, String emptyMessage) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("items", items);
+        result.put("totalAvailable", items.size());
+        if (items.isEmpty()) {
+            result.put("message", emptyMessage);
+        }
+        return result;
+    }
+
+    private boolean matchesSearchTerms(Map<String, Object> item, List<String> searchTerms) {
+        String searchableText = normalizeSearchText(String.join(
+                " ",
+                String.valueOf(item.getOrDefault("productName", "")),
+                String.valueOf(item.getOrDefault("sku", "")),
+                String.valueOf(item.getOrDefault("application", "")),
+                String.valueOf(item.getOrDefault("position", "")),
+                String.valueOf(item.getOrDefault("compatibility", "")),
+                String.valueOf(item.getOrDefault("category", ""))));
+
+        return searchTerms.stream().allMatch(searchableText::contains);
+    }
+
+    private List<String> tokenizeSearchQuery(String rawQuery) {
+        String normalized = normalizeSearchText(rawQuery);
+        if (normalized.isBlank()) {
+            return List.of();
+        }
+
+        List<String> tokens = new ArrayList<>();
+        for (String token : normalized.split("\\s+")) {
+            if (token.length() >= 2) {
+                tokens.add(token);
+            }
+        }
+        return tokens;
+    }
+
+    private String normalizeSearchText(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        String normalized = text.trim().toLowerCase(Locale.ROOT);
+        normalized = Normalizer.normalize(normalized, Normalizer.Form.NFD)
+                .replaceAll("\\p{M}", "");
+        return normalized.replaceAll("[^a-z0-9\\s]", " ").replaceAll("\\s+", " ").trim();
     }
 
     private Map<String, Object> consultarStock(String rawSku) {
@@ -626,6 +722,23 @@ public class GeminiService {
         listarCatalogo.put("description", "Lista el catálogo de repuestos con stock disponible (excluye stock cero).");
         listarCatalogo.set("parameters", listarCatalogoParams);
 
+        ObjectNode buscarRepuestosParams = objectMapper.createObjectNode();
+        buscarRepuestosParams.put("type", "OBJECT");
+        buscarRepuestosParams.set("properties", objectMapper.createObjectNode()
+                .set("consulta", objectMapper.createObjectNode()
+                        .put("type", "STRING")
+                        .put("description",
+                                "Texto de búsqueda: nombre del repuesto, vehículo o compatibilidad "
+                                        + "(ej: pastillas Fortuner, amortiguadores traseros Corsa)")));
+        buscarRepuestosParams.set("required", objectMapper.createArrayNode().add("consulta"));
+
+        ObjectNode buscarRepuestos = objectMapper.createObjectNode();
+        buscarRepuestos.put("name", "buscarRepuestos");
+        buscarRepuestos.put(
+                "description",
+                "Busca repuestos por nombre, vehículo o compatibilidad cuando el cliente no proporciona SKU.");
+        buscarRepuestos.set("parameters", buscarRepuestosParams);
+
         ObjectNode crearOrdenProperties = objectMapper.createObjectNode();
         crearOrdenProperties.set("sku", objectMapper.createObjectNode()
                 .put("type", "STRING")
@@ -688,6 +801,7 @@ public class GeminiService {
         functionDeclarations.set("functionDeclarations", objectMapper.createArrayNode()
                 .add(consultarStock)
                 .add(listarCatalogo)
+                .add(buscarRepuestos)
                 .add(crearOrden)
                 .add(prepararPedido)
                 .add(confirmarPedido));

@@ -127,13 +127,16 @@ public class TelegramBotService {
         } catch (IllegalArgumentException ex) {
             log.warn("Argumento inválido en Telegram chatId={}: {}", chatId, ex.getMessage());
             response = ex.getMessage();
+        } catch (Exception ex) {
+            log.error("Error inesperado procesando update de Telegram chatId={}", chatId, ex);
+            response = "Disculpa, ocurrió un problema al procesar tu mensaje. Intenta de nuevo o usa /catalogo.";
         }
 
         if (messageAlreadySent[0]) {
-            return response;
+            return ensureNonBlankResponse(response);
         }
 
-        return sendAndReturn(chatId, response);
+        return sendAndReturn(chatId, ensureNonBlankResponse(response));
     }
 
     private String handleCallbackQuery(TelegramCallbackQueryDTO callback) {
@@ -494,6 +497,11 @@ public class TelegramBotService {
             return contextualResponse.get();
         }
 
+        if (looksLikeMultiProductRequest(text)) {
+            telegramClientService.sendMessage(
+                    chatId, "⏳ Estoy buscando los repuestos que necesitas, un momento por favor...");
+        }
+
         try {
             GeminiChatResult result = geminiService.chat(
                     text, customer.getId(), chatSessionService.buildGeminiContext(chatId));
@@ -502,30 +510,87 @@ public class TelegramBotService {
                     chatId,
                     result.suggestedSkus().size(),
                     result.pendingOrderLines().size(),
-                    result.message().length());
+                    result.message() != null ? result.message().length() : 0);
 
             if (!result.suggestedSkus().isEmpty()) {
                 chatSessionService.recordShownSkus(chatId, result.suggestedSkus());
             }
 
             if (!result.pendingOrderLines().isEmpty()) {
+                String introMessage = ensureNonBlankResponse(
+                        result.message(),
+                        "¡Perfecto! Preparé tu pedido con los repuestos solicitados. Revisa el resumen y confirma si todo está correcto.");
                 return presentMultiItemOrderSummary(
-                        chatId, result.pendingOrderLines(), result.message(), messageAlreadySent);
+                        chatId, result.pendingOrderLines(), introMessage, messageAlreadySent);
             }
+
+            String responseText = resolveGeminiResponseText(result);
 
             if (!result.suggestedSkus().isEmpty()) {
                 telegramClientService.sendMessageWithInlineKeyboard(
                         chatId,
-                        result.message(),
+                        responseText,
                         telegramClientService.buildSuggestedSkusKeyboard(result.suggestedSkus()));
                 messageAlreadySent[0] = true;
             }
 
-            return result.message();
+            return responseText;
         } catch (Exception ex) {
             log.error("Error en asistente Gemini para chatId={}", chatId, ex);
             return "Disculpa, no pude procesar tu consulta. Intenta de nuevo o usa /catalogo.";
         }
+    }
+
+    boolean looksLikeMultiProductRequest(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+
+        String normalized = normalizeForIntent(text);
+        if (normalized.contains(" y ")) {
+            return true;
+        }
+
+        long commaCount = text.chars().filter(ch -> ch == ',').count();
+        if (commaCount >= 1) {
+            return true;
+        }
+
+        String[] tokens = normalized.split("\\s+");
+        int productHints = 0;
+        List<String> hintWords = List.of(
+                "pastilla", "pastillas", "amortiguador", "amortiguadores", "filtro", "filtros",
+                "kit", "repuesto", "repuestos", "freno", "frenos", "aceite", "lubricante");
+        for (String token : tokens) {
+            for (String hint : hintWords) {
+                if (token.startsWith(hint)) {
+                    productHints++;
+                    break;
+                }
+            }
+        }
+        return productHints >= 2;
+    }
+
+    private String resolveGeminiResponseText(GeminiChatResult result) {
+        if (result.message() != null && !result.message().isBlank()) {
+            return result.message().trim();
+        }
+        if (!result.suggestedSkus().isEmpty()) {
+            return "Encontré estos repuestos para ti. Toca 🛒 para comprar o dime si quieres agregarlos al pedido.";
+        }
+        return "¿En qué más puedo ayudarte? Puedes pedirme precios, stock o armar un pedido.";
+    }
+
+    private String ensureNonBlankResponse(String response) {
+        return ensureNonBlankResponse(response, "¿En qué más puedo ayudarte?");
+    }
+
+    private String ensureNonBlankResponse(String response, String fallback) {
+        if (response == null || response.isBlank()) {
+            return fallback;
+        }
+        return response.trim();
     }
 
     private Optional<String> tryHandleContextualPurchase(

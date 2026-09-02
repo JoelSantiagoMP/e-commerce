@@ -15,6 +15,7 @@ import com.tienda.repository.CustomerRepository;
 import com.tienda.repository.OrderItemRepository;
 import com.tienda.repository.OrderRepository;
 import com.tienda.repository.ProductVariantRepository;
+import com.tienda.telegram.service.TelegramOrderNotificationService;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
@@ -31,6 +32,7 @@ public class OrderService {
     private final ProductVariantRepository productVariantRepository;
     private final OrderRepository orderRepository;
     private final OrderItemRepository orderItemRepository;
+    private final TelegramOrderNotificationService telegramOrderNotificationService;
 
     public OrderDTO createOrder(Long customerId, List<OrderItemRequestDTO> itemsRequest) {
         Customer customer = customerRepository.findById(customerId)
@@ -107,7 +109,14 @@ public class OrderService {
         order.setStatus(newStatus);
         Order updatedOrder = orderRepository.save(order);
 
-        return toOrderDTO(updatedOrder, orderItemRepository.findByOrderId(orderId));
+        List<OrderItem> items = orderItemRepository.findByOrderId(orderId);
+        OrderDTO orderDto = toOrderDTO(updatedOrder, items);
+
+        if (newStatus == OrderStatus.CONFIRMED && previousStatus != OrderStatus.CONFIRMED) {
+            telegramOrderNotificationService.notifyOrderConfirmed(orderDto);
+        }
+
+        return orderDto;
     }
 
     @Transactional
@@ -126,7 +135,9 @@ public class OrderService {
         order.setStatus(OrderStatus.CONFIRMED);
         Order confirmedOrder = orderRepository.save(order);
 
-        return toOrderDTO(confirmedOrder, items);
+        OrderDTO orderDto = toOrderDTO(confirmedOrder, items);
+        telegramOrderNotificationService.notifyOrderConfirmed(orderDto);
+        return orderDto;
     }
 
     private void validateOrderItemsStock(List<OrderItem> items) {

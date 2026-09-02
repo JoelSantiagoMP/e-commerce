@@ -8,8 +8,11 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.tienda.dto.CategoryDTO;
 import com.tienda.dto.OrderDTO;
 import com.tienda.dto.OrderItemRequestDTO;
+import com.tienda.dto.ProductDTO;
+import com.tienda.dto.ProductVariantDTO;
 import com.tienda.entity.OrderStatus;
 import com.tienda.entity.Product;
 import com.tienda.entity.ProductVariant;
@@ -17,7 +20,9 @@ import com.tienda.gemini.config.GeminiProperties;
 import com.tienda.repository.ProductVariantRepository;
 import com.tienda.service.OrderService;
 import com.tienda.service.ProductService;
+import com.tienda.telegram.dto.PendingOrderLine;
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -159,6 +164,50 @@ class GeminiServicePrepararPedidoTest {
         assertEquals(2, itemsCaptor.getValue().size());
         assertEquals(200L, result.get("orderId"));
         assertTrue(result.get("message").toString().contains("200"));
+    }
+
+    @Test
+    void mergePendingOrderLine_accumulatesMultipleCalls() {
+        List<PendingOrderLine> lines = new ArrayList<>();
+        geminiService.mergePendingOrderLine(lines, "FRN-TOY-003", 1);
+        geminiService.mergePendingOrderLine(lines, "SUS-CHE-021", 1);
+        geminiService.mergePendingOrderLine(lines, "FRN-TOY-003", 2);
+
+        assertEquals(2, lines.size());
+        assertEquals("FRN-TOY-003", lines.get(0).sku());
+        assertEquals(3, lines.get(0).quantity());
+        assertEquals("SUS-CHE-021", lines.get(1).sku());
+        assertEquals(1, lines.get(1).quantity());
+    }
+
+    @Test
+    void executeFunction_buscarRepuestos_findsProductsByVehicleAndName() {
+        CategoryDTO category = CategoryDTO.builder().id(1L).name("Frenos").isActive(true).build();
+        ProductDTO product = ProductDTO.builder()
+                .id(10L)
+                .categoryId(1L)
+                .name("Pastillas de Freno Cerámicas")
+                .basePrice(new BigDecimal("145000"))
+                .isActive(true)
+                .build();
+        ProductVariantDTO fortuner = ProductVariantDTO.builder()
+                .sku("FRN-TOY-003")
+                .color("Hilux 2.4 / Fortuner")
+                .stock(6)
+                .isActive(true)
+                .build();
+
+        when(productService.getAllActiveCategories()).thenReturn(List.of(category));
+        when(productService.getActiveProductsByCategory(1L)).thenReturn(List.of(product));
+        when(productService.getActiveVariantsByProductId(10L)).thenReturn(List.of(fortuner));
+
+        ObjectNode args = objectMapper.createObjectNode().put("consulta", "pastillas Fortuner");
+        Map<String, Object> result = geminiService.executeFunction("buscarRepuestos", args, 1L);
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> items = (List<Map<String, Object>>) result.get("items");
+        assertEquals(1, items.size());
+        assertEquals("FRN-TOY-003", items.get(0).get("sku"));
     }
 
     private void stubVariant(String sku, long id, int stock, String price) {

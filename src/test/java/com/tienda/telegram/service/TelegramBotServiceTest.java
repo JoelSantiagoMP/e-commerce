@@ -608,6 +608,86 @@ class TelegramBotServiceTest {
         verify(telegramClientService).editMessageText(eq(chatId), eq(messageId), eq(response));
     }
 
+    @Test
+    void processUpdate_multiProductFreeText_sendsProcessingNoticeAndGeminiResponse() {
+        Long chatId = 777888999L;
+        TelegramUpdateDTO update = buildUpdate(
+                chatId,
+                "pastillas Fortuner, amortiguadores traseros Corsa y kit Logan",
+                "Cliente");
+
+        Customer customer = buildCustomer(chatId);
+        when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
+        when(geminiService.chat(
+                        eq("pastillas Fortuner, amortiguadores traseros Corsa y kit Logan"),
+                        eq(customer.getId()),
+                        any()))
+                .thenReturn(new GeminiChatResult(
+                        "",
+                        List.of("FRN-TOY-003", "SUS-CHE-021", "LUB-REN-011"),
+                        List.of()));
+        when(telegramClientService.buildSuggestedSkusKeyboard(any()))
+                .thenReturn(Map.of("inline_keyboard", List.of()));
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Encontré estos repuestos"));
+        verify(telegramClientService).sendMessage(
+                eq(chatId),
+                eq("⏳ Estoy buscando los repuestos que necesitas, un momento por favor..."));
+        verify(telegramClientService).sendMessageWithInlineKeyboard(eq(chatId), eq(response), any());
+    }
+
+    @Test
+    void processUpdate_geminiPendingOrderLines_showsConsolidatedSummary() {
+        Long chatId = 777888999L;
+        TelegramUpdateDTO update = buildUpdate(
+                chatId,
+                "quiero pastillas Fortuner y amortiguadores traseros Corsa",
+                "Cliente");
+
+        Customer customer = buildCustomer(chatId);
+        ProductVariant pastillas = buildVariant("FRN-TOY-003", 6, new BigDecimal("145000"));
+        ProductVariant amortiguadores = ProductVariant.builder()
+                .id(2L)
+                .product(Product.builder()
+                        .id(2L)
+                        .name("Amortiguadores a Gas Nitrógeno")
+                        .basePrice(new BigDecimal("180000"))
+                        .build())
+                .sku("SUS-CHE-021")
+                .color("Traseros Corsa Evolution")
+                .stock(8)
+                .isActive(true)
+                .build();
+
+        when(customerRepository.findByTelegramChatId(chatId)).thenReturn(Optional.of(customer));
+        when(geminiService.chat(any(), eq(customer.getId()), any()))
+                .thenReturn(new GeminiChatResult(
+                        "Preparé tu pedido con ambos repuestos.",
+                        List.of("FRN-TOY-003", "SUS-CHE-021"),
+                        List.of(
+                                new com.tienda.telegram.dto.PendingOrderLine("FRN-TOY-003", 1),
+                                new com.tienda.telegram.dto.PendingOrderLine("SUS-CHE-021", 1))));
+        when(productVariantRepository.findBySku("FRN-TOY-003")).thenReturn(Optional.of(pastillas));
+        when(productVariantRepository.findBySku("SUS-CHE-021")).thenReturn(Optional.of(amortiguadores));
+        when(telegramClientService.buildMultiOrderConfirmationKeyboard(any()))
+                .thenReturn(Map.of("inline_keyboard", List.of()));
+
+        String response = telegramBotService.processUpdate(update);
+
+        assertTrue(response.contains("Resumen de tu Pedido"));
+        assertTrue(response.contains("FRN-TOY-003"));
+        assertTrue(response.contains("SUS-CHE-021"));
+        verify(telegramClientService).sendMessageWithInlineKeyboard(eq(chatId), eq(response), any());
+    }
+
+    @Test
+    void looksLikeMultiProductRequest_detectsCommaSeparatedProducts() {
+        assertTrue(telegramBotService.looksLikeMultiProductRequest(
+                "pastillas Fortuner, amortiguadores traseros Corsa y kit Logan"));
+    }
+
     private Customer buildCustomer(Long chatId) {
         return Customer.builder()
                 .id(5L)
