@@ -25,7 +25,7 @@ USER spring:spring
 
 # Render inyecta PORT en runtime; 8080 es el valor por defecto local.
 ENV PORT=8080
-ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+ENV JAVA_OPTS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=60.0 -XX:InitialRAMPercentage=30.0"
 
 EXPOSE 8080
 

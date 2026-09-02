@@ -7,6 +7,12 @@ spring:
     username: ${DB_USER:root}
     password: ${DB_PASSWORD:}
     driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      # Render/Aiven cold start: el pool por defecto falla en ~1 ms si MySQL aún no responde.
+      connection-timeout: 60000
+      initialization-fail-timeout: 120000
+      maximum-pool-size: 5
+      minimum-idle: 1
 
   jpa:
     hibernate:

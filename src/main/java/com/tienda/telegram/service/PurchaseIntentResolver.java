@@ -168,6 +168,9 @@ public class PurchaseIntentResolver {
         }
 
         String normalizedApplication = normalize(application);
+        if (normalizedApplication.isBlank()) {
+            return false;
+        }
         return vehicleMentions.stream().anyMatch(normalizedApplication::contains);
     }
 
