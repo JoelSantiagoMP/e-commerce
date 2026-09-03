@@ -11,8 +11,7 @@ services:
     healthCheckPath: /actuator/health
     envVars:
       # Render inyecta PORT y RENDER_EXTERNAL_URL automáticamente en runtime.
-      - key: SERVER_PORT
-        value: "8080"
+      # Obligatorio en Dashboard: DB_URL, DB_USER, DB_PASSWORD, CORS_ALLOWED_ORIGINS
       - key: DB_URL
         sync: false
       - key: DB_USER
